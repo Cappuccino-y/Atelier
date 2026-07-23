@@ -123,12 +123,23 @@ export function parseOpenCodeOutput(stdout: string): AgentRunResult {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const obj = JSON.parse(trimmed) as { type?: unknown; text?: unknown };
+      const obj = JSON.parse(trimmed) as {
+        type?: unknown;
+        text?: unknown;
+        part?: { type?: unknown; text?: unknown };
+        error?: unknown;
+      };
       events.push(obj);
-      if (obj.type === "text" && typeof obj.text === "string") {
+      // opencode json format: { "type":"text", "part": { "type":"text", "text":"..." } }
+      const partText = obj.part?.text;
+      if (obj.type === "text" && typeof partText === "string") {
+        textParts.push(partText);
+      } else if (obj.type === "text" && typeof obj.text === "string") {
+        // fallback for older formats
         textParts.push(obj.text);
       }
     } catch {
+      // non-JSON lines: treat as raw text (single-shot CLI mode)
       textParts.push(trimmed);
     }
   }
