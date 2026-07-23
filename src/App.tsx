@@ -47,6 +47,39 @@ export default function App() {
   const [streamingTool, setStreamingTool] = useState<Record<string, string>>({});
   const [activeRunId, setActiveRunId] = useState<string | undefined>();
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
+
+  // rAF-batched streaming buffers: WS events arrive faster than 60fps and we
+  // don't want to thrash React. Accumulate deltas in refs and flush per frame.
+  const streamBufferRef = useRef<Record<string, string>>({});
+  const streamToolRef = useRef<Record<string, string | null>>({});
+  const rafIdRef = useRef<number | null>(null);
+  const flushStream = () => {
+    rafIdRef.current = null;
+    const txt = streamBufferRef.current;
+    const tl = streamToolRef.current;
+    if (Object.keys(txt).length === 0 && Object.keys(tl).length === 0) return;
+    setStreamingText(prev => {
+      const next = { ...prev };
+      for (const [k, v] of Object.entries(txt)) {
+        next[k] = (next[k] ?? "") + v;
+      }
+      return next;
+    });
+    setStreamingTool(prev => {
+      const next = { ...prev };
+      for (const [k, v] of Object.entries(tl)) {
+        if (v === null) delete next[k];
+        else next[k] = v;
+      }
+      return next;
+    });
+    streamBufferRef.current = {};
+    streamToolRef.current = {};
+  };
+  const scheduleFlush = () => {
+    if (rafIdRef.current !== null) return;
+    rafIdRef.current = requestAnimationFrame(flushStream);
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -210,7 +243,8 @@ export default function App() {
         case "agent.tool_call": {
           const p = payload as { roomId: string; agentId: string; tool: string };
           if (p.roomId === currentRoomId && p.agentId) {
-            setStreamingTool(curr => ({ ...curr, [p.agentId]: p.tool }));
+            streamToolRef.current[p.agentId] = p.tool;
+            scheduleFlush();
           }
           pushActivity({
             roomId: p.roomId,
@@ -223,10 +257,8 @@ export default function App() {
         case "agent.text_delta": {
           const p = payload as { roomId: string; agentId: string; delta: string };
           if (p.roomId === currentRoomId && p.agentId) {
-            setStreamingText(curr => ({
-              ...curr,
-              [p.agentId]: (curr[p.agentId] ?? "") + p.delta,
-            }));
+            streamBufferRef.current[p.agentId] = (streamBufferRef.current[p.agentId] ?? "") + p.delta;
+            scheduleFlush();
           }
           break;
         }
@@ -256,7 +288,10 @@ export default function App() {
             setStreamingAgentId(undefined);
           }
           if (activeRunId && p.runId === activeRunId) setActiveRunId(undefined);
-          // clear streaming buffers — final message arrived via message.created
+          // clear streaming buffers immediately (not via rAF) so no stale delta
+          // leaks into a future run by the same agent.
+          delete streamBufferRef.current[p.agentId];
+          delete streamToolRef.current[p.agentId];
           setStreamingText(curr => {
             const next = { ...curr };
             delete next[p.agentId];
@@ -282,6 +317,8 @@ export default function App() {
             setStreamingAgentId(undefined);
           }
           setActiveRunId(undefined);
+          delete streamBufferRef.current[p.agentId];
+          delete streamToolRef.current[p.agentId];
           setStreamingText(curr => {
             const next = { ...curr };
             delete next[p.agentId];
@@ -330,7 +367,7 @@ export default function App() {
       }
     });
     return unsub;
-  }, [currentRoomId, streamingAgentId, activeRunId, pushActivity]);
+  }, [currentRoomId, streamingAgentId, activeRunId, pushActivity, scheduleFlush]);
 
   // Clear streamingAgent when switching rooms
   useEffect(() => {

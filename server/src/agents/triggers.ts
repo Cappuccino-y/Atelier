@@ -42,9 +42,6 @@ export function extractTags(content: string): string[] {
 
 const runningAgents = new Set<string>();
 const agentQueues = new Map<string, Array<() => Promise<void>>>();
-/** Active AbortControllers keyed by roomId:agentId — lets the Stop-all button
- *  actually cancel in-flight work instead of just hiding UI state. */
-const activeSignals = new Map<string, AbortController>();
 
 function queueKey(roomId: string, agentId: string): string {
   return `${roomId}:${agentId}`;
@@ -53,54 +50,12 @@ function queueKey(roomId: string, agentId: string): string {
 function drainQueue(roomId: string, agentId: string) {
   const key = queueKey(roomId, agentId);
   const q = agentQueues.get(key);
-  // always clear the abort handle when this turn ends (success or cancel)
-  activeSignals.delete(key);
   if (!q || q.length === 0) {
     runningAgents.delete(key);
     return;
   }
   const next = q.shift()!;
   void next();
-}
-
-/** Cancel every in-flight agent turn in a room. The run's promise rejects with
- *  an AbortError-like failure which surfaces to clients as `agent.error`. */
-export function cancelRoomAgents(roomId: string): { cancelled: number } {
-  let cancelled = 0;
-  const prefix = `${roomId}:`;
-  for (const [key, controller] of activeSignals) {
-    if (!key.startsWith(prefix)) continue;
-    try {
-      controller.abort();
-      cancelled++;
-    } catch {}
-  }
-  return { cancelled };
-}
-
-/** Cancel every in-flight agent turn across every room. */
-export function cancelAllAgents(): { cancelled: number } {
-  let cancelled = 0;
-  for (const controller of activeSignals.values()) {
-    try {
-      controller.abort();
-      cancelled++;
-    } catch {}
-  }
-  return { cancelled };
-}
-
-/** Cancel a single (roomId, agentId) turn if it is currently running. */
-export function cancelAgent(roomId: string, agentId: string): boolean {
-  const key = queueKey(roomId, agentId);
-  const controller = activeSignals.get(key);
-  if (!controller) return false;
-  try {
-    controller.abort();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function isAgentFlooding(roomId: string, agentId: string): boolean {
@@ -124,6 +79,15 @@ type TriggerParams = {
   source?: "user" | "agent" | "self-talk";
 };
 
+/**
+ * Routes a message to the next agent(s) based ONLY on explicit @-mentions.
+ *
+ * Design rule: no implicit handoffs. Tags like [RESULT] / [REVIEW] are pure
+ * UI signals (they pick which structured card to render) — they never trigger
+ * another agent. Agents decide who to call next by writing @Name in their
+ * reply. This makes the system deterministic and loop-free at the routing
+ * layer; the model is responsible for sensible orchestration.
+ */
 export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   const allMentions = extractMentions(params.content);
   const mentions = allMentions.filter((m) => m.id !== params.authorId);
@@ -134,12 +98,7 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
     return;
   }
 
-  if (mentions.length === 0) {
-    const tags = extractTags(params.content);
-    if (tags.length === 0) return;
-    await implicitHandoff(params.roomId, params.authorId, params.content, tags);
-    return;
-  }
+  if (mentions.length === 0) return;
 
   for (const m of mentions) {
     if (isAgentFlooding(params.roomId, m.id)) {
@@ -164,27 +123,6 @@ function currentDepth(roomId: string): number {
   return row.c;
 }
 
-async function implicitHandoff(roomId: string, authorId: string, content: string, tags: string[]) {
-  if (tags.includes("RESULT") && authorId !== "lens") {
-    sendAll("agent.handoff", { roomId, from: authorId, to: "lens", reason: "RESULT" });
-    await invokeAgentAsync({
-      roomId,
-      agentId: "lens",
-      prompt: `${content}\n\n(Implicit review handoff from ${authorId})`,
-      source: "agent",
-    });
-  }
-  if (tags.includes("REVIEW") && /critical|major/i.test(content) && authorId !== "forge") {
-    sendAll("agent.handoff", { roomId, from: authorId, to: "forge", reason: "REWORK" });
-    await invokeAgentAsync({
-      roomId,
-      agentId: "forge",
-      prompt: `${content}\n\n(Implicit rework handoff from ${authorId})`,
-      source: "agent",
-    });
-  }
-}
-
 async function invokeAgentAsync(opts: {
   roomId: string;
   agentId: string;
@@ -200,16 +138,7 @@ async function invokeAgentAsync(opts: {
     runningAgents.add(key);
     const startedAt = Date.now();
     const ts = () => Date.now();
-    // expose an AbortController so Stop-all can actually interrupt the run.
-    // chain with any caller-provided signal so a parent cancellation propagates.
-    const controller = new AbortController();
-    if (opts.signal) {
-      if (opts.signal.aborted) controller.abort();
-      else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
-    }
-    activeSignals.set(key, controller);
 
-    // emit thinking event up front so UI can start streaming indicator
     sendAll("agent.thinking", {
       roomId: opts.roomId,
       agentId: opts.agentId,
@@ -219,14 +148,13 @@ async function invokeAgentAsync(opts: {
     });
 
     try {
-const result = await invokeAgent({
+      const result = await invokeAgent({
         agentId: opts.agentId,
         roomId: opts.roomId,
         prompt: opts.prompt,
         signal: opts.signal,
         runId,
         onEvent: (event) => {
-          // re-emit each opencode event as a typed WS event for live activity
           switch (event.type) {
             case "text_delta":
               sendAll("agent.text_delta", {
@@ -280,27 +208,6 @@ const result = await invokeAgent({
 
       const id = nanoid();
       const finishedAt = ts();
-      // If the run was cancelled by the Stop-all button, surface it as an error
-      // event (not a completed message) so the live activity panel and the
-      // outstanding-agent set correctly mark the agent as no longer running.
-      if (result.cancelled) {
-        sendAll("agent.error", {
-          roomId: opts.roomId,
-          agentId: opts.agentId,
-          runId,
-          error: result.error ?? "aborted by user",
-          cancelled: true,
-          elapsedMs: finishedAt - startedAt,
-          timestamp: finishedAt,
-        });
-        sendAll("system.warning", {
-          roomId: opts.roomId,
-          reason: "agent-cancelled",
-          agentId: opts.agentId,
-        });
-        return;
-      }
-
       const tags = extractTags(result.content);
       const mentionedAgents = extractMentions(result.content);
       db.prepare(`
@@ -337,7 +244,7 @@ const result = await invokeAgent({
         timestamp: finishedAt,
       });
 
-      // forward to next agent if message contains @-mentions or implicit tags
+      // Forward ONLY on explicit @-mentions in the agent's reply.
       await triggerOnMessage({
         roomId: opts.roomId,
         authorId: opts.agentId,

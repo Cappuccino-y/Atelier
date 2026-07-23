@@ -23,10 +23,10 @@ function StreamingIndicator({ agent, text, tool, onStop }: {
 }) {
   const hasText = Boolean(text && text.length > 0);
   return (
-    <div className="px-4 py-2 animate-message-in">
+    <div className="px-4 py-2 border-t border-zinc-200/80 bg-white">
       <div className="flex items-center gap-3">
         <div
-          className="h-8 w-8 rounded-full flex items-center justify-center text-[11px] font-semibold text-white ring-2 ring-white shadow-sm agent-pulse shrink-0"
+          className="h-7 w-7 rounded-full flex items-center justify-center text-[11px] font-semibold text-white ring-2 ring-white shadow-sm agent-pulse shrink-0"
           style={{ background: agent.color, color: agent.color }}
         >
           {agent.name.slice(0, 2).toUpperCase()}
@@ -67,7 +67,7 @@ function StreamingIndicator({ agent, text, tool, onStop }: {
         )}
       </div>
       {hasText && (
-        <div className="mt-2 ml-11 text-[13px] leading-relaxed text-zinc-700 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+        <div className="mt-2 ml-10 text-[13px] leading-relaxed text-zinc-700 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
           {text}
           <span className="inline-block w-1.5 h-3.5 bg-zinc-400 ml-0.5 align-middle animate-pulse" />
         </div>
@@ -140,14 +140,14 @@ export function MessageList({
     );
   }
 
-  return (
+return (
     <div
-      className="flex-1 min-h-0 bg-white relative"
+      className="flex-1 min-h-0 bg-white relative flex flex-col"
       role="log"
       aria-live="polite"
       aria-label="Conversation"
     >
-<Virtuoso
+      <Virtuoso
         ref={ref}
         data={messages}
         followOutput="smooth"
@@ -156,7 +156,7 @@ export function MessageList({
         itemContent={(index, msg) => {
           const author = agentMap.get(msg.authorId);
           const mentionedAgents = (msg.mentionedAgentIds ?? [])
-            .map((id) => agentMap.get(id))
+            .map(id => agentMap.get(id))
             .filter((a): a is Agent => Boolean(a));
           const prev = messages[index - 1];
           const isGrouped = Boolean(
@@ -174,21 +174,21 @@ export function MessageList({
           );
         }}
         components={{
-          Footer: () => (
-            <div className={cn(streamingAgent && "pb-1")}>
-              {streamingAgent && (
-                <StreamingIndicator
-                  agent={streamingAgent}
-                  text={streamingText[streamingAgent.id]}
-                  tool={streamingTool[streamingAgent.id]}
-                  onStop={onStopStreaming}
-                />
-              )}
-              <div className="h-8" />
-            </div>
-          ),
+          Footer: () => <div className="h-2" />,
         }}
+        className="flex-1 min-h-0"
       />
+
+      {/* Streaming indicator rendered OUTSIDE Virtuoso so its growing height
+          doesn't trigger Virtuoso's followOutput to re-snap and jitter the list. */}
+      {streamingAgent && (
+        <StreamingIndicator
+          agent={streamingAgent}
+          text={streamingText[streamingAgent.id]}
+          tool={streamingTool[streamingAgent.id]}
+          onStop={onStopStreaming}
+        />
+      )}
 
       {!atBottom && (
         <div className="absolute bottom-4 right-4 z-10">
