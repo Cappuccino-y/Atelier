@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+dist/
+*/dist/
+build/
+*/build/
+
+# Logs
+logs/
+*.log
+
+# Runtime / data
+*.db
+*.sqlite
+*.sqlite-journal
+data/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Env (secrets)
+.env
+.env.local
+.env.*.local
+
+# Python (proserpina bridge)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Coverage / cache
+.nyc_output/
+coverage/
+.cache/
+.turbo/
