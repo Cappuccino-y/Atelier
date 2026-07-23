@@ -1,6 +1,6 @@
 import { db } from "../db.js";
 import { config } from "../config.js";
-import { runOpenCodeAgent, type AgentRunResult } from "./process-agent.js";
+import { runOpenCodeAgent, type AgentEvent, type AgentRunResult } from "./process-agent.js";
 import { buildSystemPrompt } from "./prompts.js";
 
 const HISTORY_LIMIT = 30;
@@ -34,9 +34,9 @@ export function enrichForHandoff(roomId: string, agentId: string, basePrompt: st
   return `${basePrompt}\n\n[HISTORY]\n${historyText}\n\n[END HISTORY]\n`;
 }
 
-function formatTime(ts: number): string {
+function formatTime(ts: number): number {
   const d = new Date(ts);
-  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return d.getTime();
 }
 
 function truncate(s: string, n: number): string {
@@ -47,6 +47,9 @@ export async function invokeAgent(opts: {
   agentId: string;
   roomId: string;
   prompt: string;
+  onEvent?: (event: AgentEvent) => void;
+  signal?: AbortSignal;
+  runId?: string;
 }): Promise<AgentRunResult & { enrichedPrompt: string }> {
   const basePrompt = buildSystemPrompt(opts.agentId);
   const enriched = enrichForHandoff(opts.roomId, opts.agentId, `${basePrompt}\n\n${opts.prompt}`);
@@ -55,6 +58,9 @@ export async function invokeAgent(opts: {
     agentName: opts.agentId,
     opencodeAgent: ocAgent,
     prompt: enriched,
+    onEvent: opts.onEvent,
+    signal: opts.signal,
+    runId: opts.runId,
   });
   return { ...result, enrichedPrompt: enriched };
 }

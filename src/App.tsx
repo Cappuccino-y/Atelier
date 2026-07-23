@@ -23,8 +23,6 @@ const ACTIVITY_KINDS: ActivityKind[] = [
   "agent.error",
   "task.created",
   "task.updated",
-  "finding.raised",
-  "escalation",
   "self_talk.tick",
 ];
 
@@ -45,6 +43,9 @@ export default function App() {
   const [findings] = useState<Finding[]>([]);
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
   const [streamingAgentId, setStreamingAgentId] = useState<string | undefined>();
+  const [streamingText, setStreamingText] = useState<Record<string, string>>({});
+  const [streamingTool, setStreamingTool] = useState<Record<string, string>>({});
+  const [activeRunId, setActiveRunId] = useState<string | undefined>();
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -192,9 +193,10 @@ export default function App() {
           break;
         }
         case "agent.thinking": {
-          const p = payload as { roomId: string; agentId: string; message?: string; pending?: boolean };
-          if (p.roomId === currentRoomId && p.agentId) {
+          const p = payload as { roomId: string; agentId: string; message?: string; pending?: boolean; runId?: string };
+          if (p.roomId === currentRoomId && p.agentId && !p.pending) {
             setStreamingAgentId(p.agentId);
+            if (p.runId) setActiveRunId(p.runId);
           }
           pushActivity({
             roomId: p.roomId,
@@ -206,13 +208,35 @@ export default function App() {
           break;
         }
         case "agent.tool_call": {
-          const p = payload as { roomId: string; agentId: string; tool: string; meta?: Record<string, unknown> };
+          const p = payload as { roomId: string; agentId: string; tool: string };
+          if (p.roomId === currentRoomId && p.agentId) {
+            setStreamingTool(curr => ({ ...curr, [p.agentId]: p.tool }));
+          }
           pushActivity({
             roomId: p.roomId,
             kind: "agent.tool_call",
             agentId: p.agentId,
             message: p.tool,
-            meta: p.meta,
+          });
+          break;
+        }
+        case "agent.text_delta": {
+          const p = payload as { roomId: string; agentId: string; delta: string };
+          if (p.roomId === currentRoomId && p.agentId) {
+            setStreamingText(curr => ({
+              ...curr,
+              [p.agentId]: (curr[p.agentId] ?? "") + p.delta,
+            }));
+          }
+          break;
+        }
+        case "agent.step_done": {
+          const p = payload as { roomId: string; agentId: string; reason: string };
+          pushActivity({
+            roomId: p.roomId,
+            kind: "agent.thinking",
+            agentId: p.agentId,
+            message: `Step finished (${p.reason})`,
           });
           break;
         }
@@ -227,10 +251,22 @@ export default function App() {
           break;
         }
         case "agent.completed": {
-          const p = payload as { roomId: string; agentId: string; elapsedMs?: number };
+          const p = payload as { roomId: string; agentId: string; elapsedMs?: number; runId?: string };
           if (p.roomId === currentRoomId && streamingAgentId === p.agentId) {
             setStreamingAgentId(undefined);
           }
+          if (activeRunId && p.runId === activeRunId) setActiveRunId(undefined);
+          // clear streaming buffers — final message arrived via message.created
+          setStreamingText(curr => {
+            const next = { ...curr };
+            delete next[p.agentId];
+            return next;
+          });
+          setStreamingTool(curr => {
+            const next = { ...curr };
+            delete next[p.agentId];
+            return next;
+          });
           pushActivity({
             roomId: p.roomId,
             kind: "agent.completed",
@@ -245,6 +281,17 @@ export default function App() {
           if (p.roomId === currentRoomId && streamingAgentId === p.agentId) {
             setStreamingAgentId(undefined);
           }
+          setActiveRunId(undefined);
+          setStreamingText(curr => {
+            const next = { ...curr };
+            delete next[p.agentId];
+            return next;
+          });
+          setStreamingTool(curr => {
+            const next = { ...curr };
+            delete next[p.agentId];
+            return next;
+          });
           pushActivity({
             roomId: p.roomId,
             kind: "agent.error",
@@ -283,11 +330,13 @@ export default function App() {
       }
     });
     return unsub;
-  }, [currentRoomId, streamingAgentId, pushActivity]);
+  }, [currentRoomId, streamingAgentId, activeRunId, pushActivity]);
 
   // Clear streamingAgent when switching rooms
   useEffect(() => {
     setStreamingAgentId(undefined);
+    setStreamingText({});
+    setStreamingTool({});
   }, [currentRoomId]);
 
   // Handlers
@@ -391,16 +440,40 @@ export default function App() {
     api.selfTalkTick(currentRoomId).catch(() => {});
   }, [currentRoomId]);
 
-  const handleStopStreaming = useCallback(() => {
-    setStreamingAgentId(undefined);
-    toast.info("Stopped current generation");
-  }, []);
+  const handleStopStreaming = useCallback(async () => {
+    if (!currentRoomId) return;
+    try {
+      await api.stopAgent({
+        roomId: currentRoomId,
+        agentId: streamingAgentId,
+        runId: activeRunId,
+      });
+      setStreamingAgentId(undefined);
+      setActiveRunId(undefined);
+      toast.info("Stopped current generation");
+    } catch (err) {
+      toast.error("Failed to stop", { detail: String(err) });
+    }
+  }, [currentRoomId, streamingAgentId, activeRunId]);
 
-  const handleStopAll = useCallback(() => {
-    setStreamingAgentId(undefined);
-    setActivities([]);
-    toast.info("Stopped all running agents and cleared activity");
-  }, []);
+  const handleStopAll = useCallback(async () => {
+    // Ask the server to actually cancel in-flight runs before clearing local
+    // UI state — otherwise the agent can still complete and emit messages
+    // after the panel claims it was stopped.
+    try {
+      const result = await api.stopAgents(currentRoomId ? { roomId: currentRoomId } : {});
+      setStreamingAgentId(undefined);
+      setActivities([]);
+      if (result.cancelled > 0) {
+        toast.info(`Stopped ${result.cancelled} running agent${result.cancelled === 1 ? "" : "s"}`);
+      } else {
+        toast.info("No running agents to stop");
+      }
+    } catch (err) {
+      atchDebug.error("app", "stop-all failed", { error: String(err) });
+      toast.error("Failed to stop agents", { detail: String(err) });
+    }
+  }, [currentRoomId]);
 
   const handleToggleRightPanel = useCallback(() => {
     setRightPanelOpen(v => !v);
@@ -429,6 +502,8 @@ export default function App() {
         agents={agents}
         currentRoom={currentRoom}
         messages={messages}
+        streamingText={streamingText}
+        streamingTool={streamingTool}
         tasks={tasks}
         events={events}
         findings={findings}

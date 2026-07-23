@@ -1,8 +1,15 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
+
+export type AgentEvent =
+  | { type: "step_start"; step: string }
+  | { type: "text_delta"; delta: string }
+  | { type: "tool_use"; tool: string; input?: unknown; output?: unknown }
+  | { type: "step_finish"; reason: string }
+  | { type: "error"; message: string };
 
 export type AgentRunOptions = {
   agentName: string;
@@ -11,12 +18,19 @@ export type AgentRunOptions = {
   prompt: string;
   cwd?: string;
   timeoutMs?: number;
+  onEvent?: (event: AgentEvent) => void;
+  /** external abort signal — caller can stop generation */
+  signal?: AbortSignal;
+  /** registry key for killRun() — caller should generate (e.g. nanoid) */
+  runId?: string;
 };
 
 export type AgentRunResult = {
   content: string;
   success: boolean;
   error?: string;
+  /** true when the run was aborted via AbortSignal (Stop button) */
+  cancelled?: boolean;
   rawEvents?: unknown[];
 };
 
@@ -28,7 +42,25 @@ const MOCK_RESPONSES: Record<string, string> = {
 };
 
 export async function runOpenCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
-  if (config.agentRuntime === "mock") return mockResponse(opts);
+  if (config.agentRuntime === "mock") {
+    // simulate streaming for mock so UI flow is exercised end-to-end
+    if (opts.onEvent) {
+      opts.onEvent({ type: "step_start", step: "thinking" });
+      const text = MOCK_RESPONSES[opts.agentName.toLowerCase()] ?? "[RESULT] 完成（mock）。";
+      for (const ch of text) {
+        if (opts.signal?.aborted) {
+          return { content: "", success: false, error: "aborted by user", cancelled: true };
+        }
+        opts.onEvent({ type: "text_delta", delta: ch });
+        await new Promise(r => setTimeout(r, 8));
+      }
+      opts.onEvent({ type: "step_finish", reason: "stop" });
+    }
+    if (opts.signal?.aborted) {
+      return { content: "", success: false, error: "aborted by user", cancelled: true };
+    }
+    return mockResponse(opts);
+  }
   return runRealAgent(opts);
 }
 
@@ -60,35 +92,109 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
     let stdout = "";
     let stderr = "";
     let killed = false;
+    let aborted = false;
 
-    const child = spawn("cmd.exe", ["/d", "/s", "/c", batFile], {
+    const child: ChildProcess = spawn("cmd.exe", ["/d", "/s", "/c", batFile], {
       windowsHide: true,
       cwd,
       env: { ...process.env },
     });
+    if (opts.runId) registerRun(opts.runId, child);
 
     const timer = setTimeout(() => {
       killed = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {}
+      try { child.kill("SIGKILL"); } catch {}
     }, timeoutMs);
 
-    child.stdout.on("data", (d) => {
-      stdout += d.toString();
-    });
-    child.stderr.on("data", (d) => {
-      stderr += d.toString();
-    });
+    // external abort (Stop button)
+    const onAbort = () => {
+      aborted = true;
+      try { child.kill("SIGKILL"); } catch {}
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    const emit = opts.onEvent;
+
+    // line-buffered parser: opencode emits one JSON object per stdout chunk
+    let lineBuf = "";
+    const handleLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const obj = JSON.parse(trimmed) as {
+          type?: string;
+          part?: { type?: string; text?: string; tool?: string; state?: { input?: unknown; output?: unknown; title?: string } };
+          error?: { message?: string } | string;
+        };
+        const partType = obj.part?.type;
+        if (obj.type === "step_start") {
+          emit?.({ type: "step_start", step: partType ?? "step" });
+        } else if (obj.type === "text" && typeof obj.part?.text === "string") {
+          emit?.({ type: "text_delta", delta: obj.part.text });
+        } else if (obj.type === "tool_use" || partType === "tool") {
+          emit?.({
+            type: "tool_use",
+            tool: obj.part?.tool ?? "tool",
+            input: obj.part?.state?.input,
+            output: obj.part?.state?.output,
+          });
+        } else if (obj.type === "step_finish") {
+          const reason = (obj.part as { reason?: string })?.reason ?? "stop";
+          emit?.({ type: "step_finish", reason });
+        } else if (obj.type === "error") {
+          const msg = typeof obj.error === "string"
+            ? obj.error
+            : (obj.error?.message ?? "opencode error");
+          emit?.({ type: "error", message: msg });
+        }
+      } catch {
+        // raw text fallback for non-JSON lines (single-shot CLI mode)
+        if (trimmed) emit?.({ type: "text_delta", delta: trimmed + "\n" });
+      }
+    };
+
+    if (child.stdout) {
+      child.stdout.on("data", (d) => {
+        const chunk = d.toString();
+        stdout += chunk;
+        lineBuf += chunk;
+        let nl = lineBuf.indexOf("\n");
+        while (nl >= 0) {
+          handleLine(lineBuf.slice(0, nl));
+          lineBuf = lineBuf.slice(nl + 1);
+          nl = lineBuf.indexOf("\n");
+        }
+      });
+    }
+
+    if (child.stderr) {
+      child.stderr.on("data", (d) => {
+        const chunk = d.toString();
+        stderr += chunk;
+        for (const line of chunk.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed) emit?.({ type: "error", message: trimmed });
+        }
+      });
+    }
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      try {
-        rmSync(tmpDir, { recursive: true, force: true });
-      } catch {}
+      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 
+      // flush trailing line if any
+      if (lineBuf.trim()) handleLine(lineBuf);
+
+      if (aborted) {
+        resolve({ content: stdout, success: false, error: "aborted by user", cancelled: true });
+        return;
+      }
       if (killed) {
-        resolve({ content: "", success: false, error: `timeout after ${timeoutMs}ms` });
+        resolve({ content: stdout, success: false, error: `timeout after ${timeoutMs}ms` });
         return;
       }
 
@@ -106,9 +212,8 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      try {
-        rmSync(tmpDir, { recursive: true, force: true });
-      } catch {}
+      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
       resolve({ content: "", success: false, error: err.message });
     });
   });
@@ -150,4 +255,21 @@ export function parseOpenCodeOutput(stdout: string): AgentRunResult {
     success: content.length > 0,
     rawEvents: events,
   };
+}
+
+/* ---- registry for cross-process cancellation ----------------------------- */
+
+const activeChildren = new Map<string, ChildProcess>();
+
+export function registerRun(runId: string, child: ChildProcess): void {
+  activeChildren.set(runId, child);
+  child.once("close", () => activeChildren.delete(runId));
+}
+
+export function killRun(runId: string): boolean {
+  const child = activeChildren.get(runId);
+  if (!child) return false;
+  try { child.kill("SIGKILL"); } catch {}
+  activeChildren.delete(runId);
+  return true;
 }

@@ -4,7 +4,7 @@ const WS_BASE = (import.meta.env.VITE_WS_URL as string) || "ws://127.0.0.1:8787/
 
 export type WsStatus = "connecting" | "connected" | "disconnected";
 
-export type WsHandler = (event: ServerEvent, payload: unknown) => void;
+export type WsHandler = (event: ServerEvent, payload: unknown, sentAt: number) => void;
 export type WsStatusListener = (status: WsStatus) => void;
 
 export class WSClient {
@@ -49,7 +49,7 @@ export class WSClient {
           return;
         }
         if (msg.event && this.handlers.size > 0) {
-          for (const h of this.handlers) h(msg.event as ServerEvent, msg.payload);
+          for (const h of this.handlers) h(msg.event as ServerEvent, msg.payload, msg.ts ?? Date.now());
         }
       } catch (err) {
         console.error("WS parse error", err);

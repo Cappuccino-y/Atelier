@@ -18,6 +18,8 @@ type Props = {
   agents: Agent[];
   currentRoom?: Room;
   messages: Message[];
+  streamingText: Record<string, string>;
+  streamingTool: Record<string, string>;
   tasks: Task[];
   events: Event[];
   findings: Finding[];
@@ -75,21 +77,27 @@ export function AppShell(props: Props) {
   const flatFindings: Finding[] = useMemoFlatFindings(allMessages);
 
   const activeAgentIds = useMemo(() => {
+    if (!props.currentRoom) return [];
     const ids = new Set<string>();
-    // most recent thinking event without a subsequent completed = active
-    const sorted = [...props.activities].sort((a, b) => b.timestamp - a.timestamp);
+    // Scope to the current room — App-level activity state receives events
+    // from every room and would otherwise leak across rooms.
+    // Walk events chronologically so a normal thinking → completed/errored
+    // sequence leaves the agent in the correct final state. Descending order
+    // would let an older thinking event re-add an agent after a newer
+    // completion.
+    const sorted = props.activities
+      .filter(a => a.roomId === props.currentRoom!.id)
+      .sort((a, b) => a.timestamp - b.timestamp);
     for (const ev of sorted) {
-      if (ev.kind === "agent.completed" && ev.agentId) {
-        // mark agent as not active
-        ids.delete(ev.agentId);
-      } else if (ev.kind === "agent.thinking" && ev.agentId) {
+      if (!ev.agentId) continue;
+      if (ev.kind === "agent.thinking") {
         ids.add(ev.agentId);
-      } else if (ev.kind === "agent.error" && ev.agentId) {
+      } else if (ev.kind === "agent.completed" || ev.kind === "agent.error") {
         ids.delete(ev.agentId);
       }
     }
     return Array.from(ids);
-  }, [props.activities]);
+  }, [props.activities, props.currentRoom]);
 
   const unreadRooms = props.rooms.filter(r => r.unread > 0).length;
 
@@ -131,6 +139,8 @@ export function AppShell(props: Props) {
                 messages={allMessages}
                 agents={props.agents}
                 streamingAgent={props.streamingAgent}
+                streamingText={props.streamingText}
+                streamingTool={props.streamingTool}
                 onStopStreaming={props.onStopStreaming}
               />
               <Composer agents={props.agents} onSend={props.onSendMessage} />

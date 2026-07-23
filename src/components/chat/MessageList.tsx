@@ -10,44 +10,76 @@ type Props = {
   messages: Message[];
   agents: Agent[];
   streamingAgent?: Agent | null;
+  streamingText?: Record<string, string>;
+  streamingTool?: Record<string, string>;
   onStopStreaming?: () => void;
 };
 
-function StreamingIndicator({ agent, onStop }: { agent: Agent; onStop?: () => void }) {
+function StreamingIndicator({ agent, text, tool, onStop }: {
+  agent: Agent;
+  text?: string;
+  tool?: string;
+  onStop?: () => void;
+}) {
+  const hasText = Boolean(text && text.length > 0);
   return (
-    <div className="flex items-center gap-3 px-4 py-2 animate-message-in">
-      <div
-        className="h-8 w-8 rounded-full flex items-center justify-center text-[11px] font-semibold text-white ring-2 ring-white shadow-sm agent-pulse shrink-0"
-        style={{ background: agent.color, color: agent.color }}
-      >
-        {agent.name.slice(0, 2).toUpperCase()}
-      </div>
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="text-[12.5px] font-medium text-zinc-700 truncate">{agent.name}</span>
-        <span className="text-[11px] text-zinc-400">is thinking</span>
-        <div className="flex items-center gap-1 ml-1">
-          <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-zinc-400" />
-          <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-zinc-400" />
-          <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-zinc-400" />
-        </div>
-      </div>
-      {onStop && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onStop}
-          className="ml-auto h-7 px-2.5 text-[11px] rounded-full border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900"
-          title="Stop generating"
+    <div className="px-4 py-2 animate-message-in">
+      <div className="flex items-center gap-3">
+        <div
+          className="h-8 w-8 rounded-full flex items-center justify-center text-[11px] font-semibold text-white ring-2 ring-white shadow-sm agent-pulse shrink-0"
+          style={{ background: agent.color, color: agent.color }}
         >
-          <Square className="h-2.5 w-2.5 mr-1 fill-current" />
-          Stop
-        </Button>
+          {agent.name.slice(0, 2).toUpperCase()}
+        </div>
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className="text-[12.5px] font-medium text-zinc-700 truncate">{agent.name}</span>
+          {tool ? (
+            <>
+              <span className="text-[11px] text-zinc-400">running tool</span>
+              <code className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 border border-zinc-200 text-zinc-700 font-mono">
+                {tool}
+              </code>
+            </>
+          ) : !hasText ? (
+            <>
+              <span className="text-[11px] text-zinc-400">is thinking</span>
+              <div className="flex items-center gap-1 ml-1">
+                <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-zinc-400" />
+                <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-zinc-400" />
+                <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-zinc-400" />
+              </div>
+            </>
+          ) : (
+            <span className="text-[11px] text-zinc-400">streaming</span>
+          )}
+        </div>
+        {onStop && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onStop}
+            className="ml-auto h-7 px-2.5 text-[11px] rounded-full border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900"
+            title="Stop generating"
+          >
+            <Square className="h-2.5 w-2.5 mr-1 fill-current" />
+            Stop
+          </Button>
+        )}
+      </div>
+      {hasText && (
+        <div className="mt-2 ml-11 text-[13px] leading-relaxed text-zinc-700 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+          {text}
+          <span className="inline-block w-1.5 h-3.5 bg-zinc-400 ml-0.5 align-middle animate-pulse" />
+        </div>
       )}
     </div>
   );
 }
 
-export function MessageList({ messages, agents, streamingAgent = null, onStopStreaming }: Props) {
+export function MessageList({
+  messages, agents, streamingAgent = null,
+  streamingText = {}, streamingTool = {}, onStopStreaming,
+}: Props) {
   const ref = useRef<VirtuosoHandle>(null);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
   const [atBottom, setAtBottom] = useState(true);
@@ -145,9 +177,14 @@ export function MessageList({ messages, agents, streamingAgent = null, onStopStr
           Footer: () => (
             <div className={cn(streamingAgent && "pb-1")}>
               {streamingAgent && (
-                <StreamingIndicator agent={streamingAgent} onStop={onStopStreaming} />
+                <StreamingIndicator
+                  agent={streamingAgent}
+                  text={streamingText[streamingAgent.id]}
+                  tool={streamingTool[streamingAgent.id]}
+                  onStop={onStopStreaming}
+                />
               )}
-              <div className="h-6" />
+              <div className="h-8" />
             </div>
           ),
         }}

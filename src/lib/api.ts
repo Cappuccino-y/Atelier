@@ -81,6 +81,17 @@ export const api = {
     }),
 
   runtimeStatus: () => request<{ runtime: string; model: string }>("/api/runtime/status"),
+  stopAgents: (body: { roomId?: string } = {}) =>
+    request<{ ok: true; cancelled: number; roomId: string | null }>("/api/runtime/stop", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  stopAgent: (body: { roomId: string; agentId?: string; runId?: string }) =>
+    request<{ ok: true; killed: number }>("/api/agents/stop", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   mcpRooms: () => request<{ rooms: Array<{ id: string; name: string }> }>("/mcp/rooms"),
 

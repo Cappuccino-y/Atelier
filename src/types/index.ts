@@ -72,8 +72,6 @@ export type ActivityKind =
   | "agent.error"
   | "task.created"
   | "task.updated"
-  | "finding.raised"
-  | "escalation"
   | "self_talk.tick";
 
 export type ActivityEvent = {
@@ -128,6 +126,8 @@ export type ServerEvent =
   | "review.completed"
   | "agent.thinking"
   | "agent.tool_call"
+  | "agent.text_delta"
+  | "agent.step_done"
   | "agent.handoff"
   | "agent.completed"
   | "agent.error"

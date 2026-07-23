@@ -5,7 +5,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   ListTodo, Activity, StickyNote, AlertTriangle, History, Plus, Play, Pause,
-  Circle, CheckCircle2, AlertCircle, Clock, Sparkles, Zap, ArrowRight, Wrench, Hand,
+  Circle, CheckCircle2, AlertCircle, Clock, Sparkles, ArrowRight, Wrench, Hand,
 } from "lucide-react";
 import type { Task, Message, Finding, Event, Room, Agent, ActivityEvent } from "@/types";
 import { cn, debounce, formatTime, formatRelativeTime } from "@/lib/utils";
@@ -107,7 +107,7 @@ export function RightPanel({
         </div>
 
         <div className="flex-1 min-h-0 overflow-hidden">
-          {tab === "live" && <LiveTab activities={activities} agents={agents} onStopAll={onStopAll} />}
+          {tab === "live" && <LiveTab room={room} activities={activities} agents={agents} onStopAll={onStopAll} />}
           {tab === "tasks" && <TasksTab tasks={tasks} onCreate={onCreateTask} onUpdate={onUpdateTask} onDelete={onDeleteTask} />}
           {tab === "notes" && <NotesTab notes={notes} status={notesStatus} onChange={handleNotesChange} />}
           {tab === "findings" && <FindingsTab findings={findings} />}
@@ -118,29 +118,35 @@ export function RightPanel({
   );
 }
 
-function LiveTab({ activities, agents, onStopAll }: {
-  activities: ActivityEvent[]; agents: Agent[]; onStopAll?: () => void;
+function LiveTab({ room, activities, agents, onStopAll }: {
+  room: Room; activities: ActivityEvent[]; agents: Agent[]; onStopAll?: () => void;
 }) {
   const agentMap = new Map(agents.map(a => [a.id, a]));
-  // newest first
-  const ordered = [...activities].sort((a, b) => b.timestamp - a.timestamp);
+  // Scope to the current room — App-level activity state includes events from
+  // every room and would otherwise leak across rooms.
+  const roomActivities = activities.filter(a => a.roomId === room.id);
 
-  const hasThinking = activities.some(a => a.kind === "agent.thinking");
-
-  // Determine which agents have an outstanding thinking (not yet completed since)
+  // Determine which agents have an outstanding thinking (not yet completed/errored since)
+  // by walking the events in chronological order and folding terminal events.
   const outstanding = new Set<string>();
   const thinkingAgents = new Set<string>();
-  const completedAgents = new Set<string>();
-  [...activities]
+  [...roomActivities]
     .sort((a, b) => a.timestamp - b.timestamp)
     .forEach(e => {
-      if (e.kind === "agent.thinking" && e.agentId) thinkingAgents.add(e.agentId);
-      if (e.kind === "agent.completed" && e.agentId) {
-        completedAgents.add(e.agentId);
+      if (e.kind === "agent.thinking" && e.agentId) {
+        thinkingAgents.add(e.agentId);
+      } else if ((e.kind === "agent.completed" || e.kind === "agent.error") && e.agentId) {
         thinkingAgents.delete(e.agentId);
       }
     });
   thinkingAgents.forEach(id => outstanding.add(id));
+
+  // "Has thinking" is derived from the live outstanding set so the Stop button
+  // disappears as soon as the last running agent finishes/errors.
+  const hasThinking = outstanding.size > 0;
+
+  // newest first for display
+  const ordered = [...roomActivities].sort((a, b) => b.timestamp - a.timestamp);
 
   return (
     <div className="flex flex-col h-full">
@@ -279,10 +285,6 @@ function describeEvent(e: ActivityEvent, agent?: Agent): { Icon: any; primary: s
       return { Icon: ListTodo, primary: `Task created`, secondary: detail };
     case "task.updated":
       return { Icon: ListTodo, primary: `Task updated`, secondary: detail };
-    case "finding.raised":
-      return { Icon: AlertTriangle, primary: `Finding raised`, secondary: detail };
-    case "escalation":
-      return { Icon: Zap, primary: `Escalation`, secondary: detail };
     case "self_talk.tick":
       return { Icon: ArrowRight, primary: `Self-talk tick`, secondary: detail };
     default:
