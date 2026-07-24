@@ -4,6 +4,7 @@ import { CreateRoomDialog } from "@/components/CreateRoomDialog";
 import { RoomSettingsDialog } from "@/components/RoomSettingsDialog";
 import { TaskEditDialog } from "@/components/TaskEditDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { api } from "@/lib/api";
 import { ws } from "@/lib/ws";
 import { atchDebug } from "@/lib/atch-debug";
@@ -40,7 +41,6 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
-  const [findings] = useState<Finding[]>([]);
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
   const [streamingAgentId, setStreamingAgentId] = useState<string | undefined>();
   const [streamingText, setStreamingText] = useState<Record<string, string>>({});
@@ -136,6 +136,23 @@ export default function App() {
     ws.connect();
     return () => ws.disconnect();
   }, []);
+
+  // Re-fetch room data on WS reconnect (missed events during disconnect gap)
+  useEffect(() => {
+    const unsub = ws.onReconnect(() => {
+      if (!currentRoomId) return;
+      Promise.all([
+        api.listMessages(currentRoomId),
+        api.listTasks(currentRoomId),
+        api.listRoomEvents(currentRoomId),
+      ]).then(([msgs, tks, evs]) => {
+        setMessages(msgs);
+        setTasks(tks);
+        setEvents(evs);
+      }).catch(() => {});
+    });
+    return unsub;
+  }, [currentRoomId]);
 
   // Load room data when room changes
   useEffect(() => {
@@ -532,6 +549,7 @@ export default function App() {
   }
 
   return (
+    <ErrorBoundary>
     <>
       <AppShell
         rooms={rooms}
@@ -543,7 +561,6 @@ export default function App() {
         streamingTool={streamingTool}
         tasks={tasks}
         events={events}
-        findings={findings}
         activities={activities}
         streamingAgent={streamingAgent}
         wsStatus={wsStatus}
@@ -583,12 +600,13 @@ export default function App() {
         />
       )}
       {reviewResult && (
-        <div className="fixed bottom-4 right-4 bg-popover border rounded-lg p-4 max-w-md shadow-xl">
+        <div className="fixed bottom-20 right-4 bg-popover border rounded-lg p-4 max-w-md shadow-xl z-50">
           <div className="font-semibold text-sm mb-2">Review: {reviewResult.summary}</div>
           <button className="text-xs underline" onClick={() => setReviewResult(null)}>close</button>
         </div>
       )}
       <Toaster />
     </>
+    </ErrorBoundary>
   );
 }

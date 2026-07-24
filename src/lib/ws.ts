@@ -11,8 +11,10 @@ export class WSClient {
   private ws: WebSocket | null = null;
   private handlers = new Set<WsHandler>();
   private statusListeners = new Set<WsStatusListener>();
+  private reconnectListeners = new Set<() => void>();
   private status: WsStatus = "disconnected";
   private reconnectAttempts = 0;
+  private firstConnect = true;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private explicitlyClosed = false;
 
@@ -39,6 +41,11 @@ export class WSClient {
       this.reconnectAttempts = 0;
       this.setStatus("connected");
       this.startPing();
+      if (this.firstConnect) {
+        this.firstConnect = false;
+      } else {
+        for (const l of this.reconnectListeners) l();
+      }
     };
 
     this.ws.onmessage = (e) => {
@@ -85,6 +92,13 @@ export class WSClient {
     listener(this.status);
     return () => {
       this.statusListeners.delete(listener);
+    };
+  }
+
+  onReconnect(listener: () => void): () => void {
+    this.reconnectListeners.add(listener);
+    return () => {
+      this.reconnectListeners.delete(listener);
     };
   }
 

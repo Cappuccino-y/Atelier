@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -47,6 +47,33 @@ export function RightPanel({
     setNotes(room.notes ?? "");
   }, [room.id, room.notes]);
 
+  const [widthPx, setWidthPx] = useState(320);
+  const widthRef = useRef(widthPx);
+  widthRef.current = widthPx;
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = widthRef.current;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX;
+      setWidthPx(Math.max(240, Math.min(600, startWidth + delta)));
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
+
   function handleNotesChange(v: string) {
     setNotes(v);
     setNotesStatus("saving");
@@ -62,9 +89,9 @@ export function RightPanel({
   ];
 
   return (
-    <aside className="relative w-80 border-l border-zinc-200/80 bg-zinc-50/50 flex shrink-0">
+    <aside className="relative border-l border-zinc-200/80 bg-zinc-50/50 flex shrink-0" style={{ width: widthPx }}>
       {/* resize handle stub */}
-      <div className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-10 flex flex-col items-center justify-center gap-0.5 group">
+      <div className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-10 flex flex-col items-center justify-center gap-0.5 group" onMouseDown={handleResizeMouseDown}>
         <span className="h-1 w-1 rounded-full bg-zinc-300 group-hover:bg-zinc-400" />
         <span className="h-1 w-1 rounded-full bg-zinc-300 group-hover:bg-zinc-400" />
         <span className="h-1 w-1 rounded-full bg-zinc-300 group-hover:bg-zinc-400" />

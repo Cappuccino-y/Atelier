@@ -1,14 +1,7 @@
-import { Search, Bell, MoreHorizontal, Settings, User, LogOut, Sparkles } from "lucide-react";
+import { Search, Bell, MoreHorizontal, Sparkles } from "lucide-react";
 import type { WsStatus } from "@/lib/ws";
 import type { Agent } from "@/types";
 import { cn } from "@/lib/utils";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
 import {
   Tooltip,
   TooltipContent,
@@ -193,32 +186,13 @@ export function TopBar({
       </button>
 
       {/* Overflow menu */}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-label="More options"
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-[180px]">
-          <DropdownMenuItem onSelect={() => {}}>
-            <Settings className="mr-2 h-3.5 w-3.5" />
-            Settings
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => {}}>
-            <User className="mr-2 h-3.5 w-3.5" />
-            Profile
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => {}} className="text-red-600 focus:text-red-600">
-            <LogOut className="mr-2 h-3.5 w-3.5" />
-            Sign out
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <button
+        type="button"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        aria-label="More options"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
     </div>
   );
 }

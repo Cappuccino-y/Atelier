@@ -22,7 +22,7 @@ export function loadRoomThread(roomId: string, agentId: string): ChatMessage[] {
 
   return rows.reverse().map((m) => ({
     role: m.author_id === agentId ? "assistant" : "user",
-    content: `[${m.author_id} ${formatTime(m.timestamp)}]\n${truncate(m.content, CONTENT_TRUNCATE)}`,
+      content: `[${m.author_id} ${new Date(m.timestamp).toLocaleTimeString()}]\n${truncate(m.content, CONTENT_TRUNCATE)}`,
   }));
 }
 
@@ -32,11 +32,6 @@ export function enrichForHandoff(roomId: string, agentId: string, basePrompt: st
     .map((m) => `${m.role === "assistant" ? "[ASSISTANT]" : "[USER]"}\n${m.content}`)
     .join("\n\n");
   return `${basePrompt}\n\n[HISTORY]\n${historyText}\n\n[END HISTORY]\n`;
-}
-
-function formatTime(ts: number): number {
-  const d = new Date(ts);
-  return d.getTime();
 }
 
 function truncate(s: string, n: number): string {

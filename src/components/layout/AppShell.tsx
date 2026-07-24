@@ -22,7 +22,6 @@ type Props = {
   streamingTool: Record<string, string>;
   tasks: Task[];
   events: Event[];
-  findings: Finding[];
   activities: ActivityEvent[];
   streamingAgent?: Agent | null;
   wsStatus: WsStatus;

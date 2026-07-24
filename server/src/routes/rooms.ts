@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
 import { db } from "../db.js";
+import { sendAll } from "../broadcast.js";
 
 export async function routes(app: FastifyInstance) {
   app.get("/api/rooms", async () => {
@@ -25,6 +26,7 @@ export async function routes(app: FastifyInstance) {
       db.prepare("UPDATE rooms SET project_id = ? WHERE id = ?").run(projectId, id);
     }
     const row = db.prepare("SELECT * FROM rooms WHERE id = ?").get(id) as any;
+    sendAll("room.created", normalizeRoom(row));
     return normalizeRoom(row);
   });
 
@@ -41,6 +43,7 @@ export async function routes(app: FastifyInstance) {
     db.prepare(`UPDATE rooms SET ${fields.join(", ")} WHERE id = ?`).run(...vals);
     const row = db.prepare("SELECT * FROM rooms WHERE id = ?").get(req.params.id) as any;
     if (!row) return reply.code(404).send({ error: "not found" });
+    sendAll("room.updated", normalizeRoom(row));
     return normalizeRoom(row);
   });
 
@@ -49,6 +52,7 @@ export async function routes(app: FastifyInstance) {
     db.prepare("DELETE FROM tasks WHERE room_id = ?").run(req.params.id);
     db.prepare("DELETE FROM events WHERE room_id = ?").run(req.params.id);
     db.prepare("DELETE FROM rooms WHERE id = ?").run(req.params.id);
+    sendAll("room.deleted", { id: req.params.id });
     return { ok: true };
   });
 
