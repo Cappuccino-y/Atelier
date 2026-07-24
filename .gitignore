@@ -31,11 +31,13 @@ Thumbs.db
 .env.local
 .env.*.local
 
-# Python (proserpina bridge)
+# Python (proserpina bridge + agent test artifacts)
 __pycache__/
 *.pyc
 .venv/
 venv/
+server/*.py
+server/games/
 
 # Coverage / cache
 .nyc_output/

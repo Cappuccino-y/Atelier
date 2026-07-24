@@ -276,7 +276,13 @@ function BlockerCard({
   mentionedAgents: Agent[];
 }) {
   const body = stripTag(content, "BLOCKER");
-  const ownerName = mentionedAgents[0]?.name;
+  // Owner lookup: prefer explicit @mentions, then scan prose for any agent
+  // name as a substring (model often writes "Atlas" without the @ symbol),
+  // finally fall back to "Unassigned".
+  const ownerName =
+    mentionedAgents[0]?.name ??
+    findAgentNameInText(body) ??
+    null;
   return (
     <div className="relative my-1.5 rounded-[10px] border border-red-200/80 bg-white overflow-hidden">
       <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-red-500" />
@@ -300,6 +306,23 @@ function BlockerCard({
       </div>
     </div>
   );
+}
+
+// Best-effort owner scan: find the first occurrence of any known agent name
+// as a substring in the blocker body. We intentionally use a tiny hardcoded
+// list here — pulling agent names from the Agent registry would couple this
+// card to props state, and the four Atelier agents are stable.
+const KNOWN_AGENT_NAMES = ["Atlas", "Forge", "Lens", "Echo"];
+function findAgentNameInText(text: string): string | null {
+  const lower = text.toLowerCase();
+  let best: { name: string; idx: number } | null = null;
+  for (const name of KNOWN_AGENT_NAMES) {
+    const idx = lower.indexOf(name.toLowerCase());
+    if (idx >= 0 && (best === null || idx < best.idx)) {
+      best = { name, idx };
+    }
+  }
+  return best?.name ?? null;
 }
 
 function TodoCard({ content }: { content: string }) {
@@ -353,14 +376,15 @@ function TimelineRow({
   content: string;
 }) {
   return (
-    <div className="flex items-center gap-2 h-7 px-2 my-0.5 rounded-md bg-zinc-50/70 border border-zinc-200/60">
+    <div className="flex items-baseline gap-2 my-1 text-[13.5px] leading-relaxed">
       <span
-        className="h-2 w-2 rounded-full shrink-0"
+        className="h-2 w-2 rounded-full shrink-0 self-center"
         style={{ background: authorColor }}
       />
-      <span className="text-[12px] font-medium text-zinc-700">{authorName}</span>
-      <span className="text-[11.5px] text-zinc-500">· status update</span>
-      <span className="text-[12px] text-zinc-600 truncate min-w-0 flex-1">
+      <span className="text-[11px] uppercase tracking-wider font-semibold text-zinc-500 shrink-0">
+        {authorName} · status
+      </span>
+      <span className="text-zinc-700 min-w-0 flex-1">
         {stripTag(content, "STATUS")}
       </span>
     </div>
@@ -497,10 +521,7 @@ export function MessageItem({
                 "relative w-full break-words",
                 isUser
                   ? "rounded-2xl rounded-br-md px-3.5 py-2 bg-indigo-600 text-white"
-                  : cn(
-                      "pl-3 pr-1 py-1",
-                      !isGrouped && "border-l-2 border-zinc-200"
-                    )
+                  : "py-1"
               )}
             >
               <div
@@ -549,7 +570,12 @@ export function MessageItem({
             )}
 
             {mentionedAgents.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-1">
+              <div className="flex flex-wrap items-center gap-1 mt-1">
+                {!isUser && (
+                  <span className="text-[10.5px] text-zinc-400 mr-0.5" title="Handed off to">
+                    →
+                  </span>
+                )}
                 {mentionedAgents.map((a) => (
                   <span
                     key={a.id}

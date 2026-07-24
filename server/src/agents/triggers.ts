@@ -5,9 +5,11 @@ import { nanoid } from "nanoid";
 
 const TAG_RE = /\[(DECISION|TODO|STATUS|RESULT|REVIEW|QUESTION|BLOCKER)\]/g;
 const MENTION_RE = /@(!?)([\w一-鿿]+)/g;
+const HANDOFF_RE = /```handoff\s*\n([\s\S]*?)```/;
 const MAX_HANDOFF_DEPTH = 50;
 const FLOOD_WINDOW = 10;
 const FLOOD_THRESHOLD = 5;
+const MAX_PARALLEL_AGENTS = 4;
 
 type AgentRow = { id: string; name: string };
 const agentCache = new Map<string, AgentRow>();
@@ -17,6 +19,11 @@ function getAgentByName(name: string): AgentRow | null {
   if (agentCache.has(key)) return agentCache.get(key)!;
   const row = db.prepare("SELECT id, name FROM agents WHERE LOWER(name) = ?").get(key) as AgentRow | undefined;
   if (row) agentCache.set(key, row);
+  return row ?? null;
+}
+
+function getAgentById(id: string): AgentRow | null {
+  const row = db.prepare("SELECT id, name FROM agents WHERE id = ?").get(id) as AgentRow | undefined;
   return row ?? null;
 }
 
@@ -32,6 +39,62 @@ export function extractMentions(content: string): Array<{ name: string; id: stri
     }
   }
   return out;
+}
+
+export type HandoffDirective = {
+  to: Array<{ id: string; name: string }>;
+  task?: string;
+};
+
+/**
+ * Parses an explicit handoff JSON block from agent output.
+ *
+ * Format (anywhere in the agent's reply, usually at the end):
+ *
+ *   ```handoff
+ *   {"to": ["forge", "lens"], "task": "review this change"}
+ *   ```
+ *
+ * Returns null if no block found or block is malformed. We deliberately do
+ * NOT fall back to @mention regex — that would re-introduce the same
+ * false-positive problem we're fixing. Mentioning an agent in prose is
+ * descriptive, not actionable.
+ */
+export function extractHandoff(content: string): HandoffDirective | null {
+  const m = content.match(HANDOFF_RE);
+  if (!m) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(m[1].trim());
+  } catch {
+    return null;
+  }
+  if (!parsed || !Array.isArray(parsed.to)) return null;
+  const seen = new Set<string>();
+  const targets: Array<{ id: string; name: string }> = [];
+  for (const raw of parsed.to) {
+    let agent: AgentRow | null = null;
+    if (typeof raw === "string") {
+      agent = getAgentByName(raw) ?? getAgentById(raw);
+    } else if (raw && typeof raw === "object" && typeof raw.id === "string") {
+      agent = getAgentByName(raw.id) ?? getAgentById(raw.id) ??
+              (typeof raw.name === "string" ? getAgentByName(raw.name) : null);
+    }
+    if (agent && !seen.has(agent.id)) {
+      targets.push({ id: agent.id, name: agent.name });
+      seen.add(agent.id);
+    }
+  }
+  if (targets.length === 0) return null;
+  return { to: targets, task: typeof parsed.task === "string" ? parsed.task : undefined };
+}
+
+/**
+ * Strip the ```handoff ... ``` block from content for display. Routing
+ * metadata should not pollute the prose the user reads.
+ */
+export function stripHandoff(content: string): string {
+  return content.replace(HANDOFF_RE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function extractTags(content: string): string[] {
@@ -77,20 +140,45 @@ type TriggerParams = {
   content: string;
   parentMessageId?: string;
   source?: "user" | "agent" | "self-talk";
+  /**
+   * Explicit routing targets, used when an agent's reply contains a
+   * structured ```handoff``` block. Required for agent→agent routing.
+   * When omitted, agent replies do NOT trigger anything (prose @mentions are
+   * descriptive only — see extractHandoff comment).
+   */
+  explicitTargets?: Array<{ id: string; name: string }>;
+  handoffTask?: string;
 };
 
 /**
- * Routes a message to the next agent(s) based ONLY on explicit @-mentions.
+ * Routes a message to the next agent(s).
  *
- * Design rule: no implicit handoffs. Tags like [RESULT] / [REVIEW] are pure
- * UI signals (they pick which structured card to render) — they never trigger
- * another agent. Agents decide who to call next by writing @Name in their
- * reply. This makes the system deterministic and loop-free at the routing
- * layer; the model is responsible for sensible orchestration.
+ * Two legitimate routing sources:
+ *   - USER message: @mention in the text triggers the named agents
+ *   - AGENT reply: a ```handoff``` JSON block with explicit "to" triggers;
+ *     prose @mentions are descriptive and ignored
+ *
+ * Anything else (prose mentions in agent replies, magic tags) does NOT route.
+ * Industry consensus (OpenAI Agents SDK, LangGraph Command(goto=), AutoGen
+ * HandoffMessage, SW4RM) — routing must be a structured signal, not parsed
+ * from natural language. Parsing prose is fragile and causes false positives.
  */
 export async function triggerOnMessage(params: TriggerParams): Promise<void> {
-  const allMentions = extractMentions(params.content);
-  const mentions = allMentions.filter((m) => m.id !== params.authorId);
+  let targets: Array<{ id: string; name: string }> = [];
+
+  if (params.authorId === "user") {
+    // User messages: parse @mentions from text. Simple, unambiguous.
+    targets = extractMentions(params.content);
+  } else if (params.explicitTargets && params.explicitTargets.length > 0) {
+    // Agent→agent: only the structured handoff block drives routing.
+    targets = params.explicitTargets;
+  } else {
+    // No legitimate routing source — drop it.
+    return;
+  }
+
+  // Drop self-mentions (an agent handing off to itself is a no-op).
+  targets = targets.filter((m) => m.id !== params.authorId);
 
   const depth = currentDepth(params.roomId);
   if (depth > MAX_HANDOFF_DEPTH) {
@@ -98,21 +186,46 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
     return;
   }
 
-  if (mentions.length === 0) return;
+  if (targets.length === 0) return;
 
-  for (const m of mentions) {
-    if (isAgentFlooding(params.roomId, m.id)) {
-      sendAll("system.warning", { roomId: params.roomId, reason: "flood", agentId: m.id });
-      continue;
-    }
-    await invokeAgentAsync({
+  // Fan-out: invoke all targets in parallel (Promise.allSettled so a single
+  // failure doesn't abort the others). Each agent maintains its own
+  // (room, agentId) running slot — the same agent is queued, not duplicated.
+  // Completion order is determined by wall-clock, not invocation order.
+  //
+  // Industry consensus: LangGraph's Send API, OpenAI Swarm/Agents SDK's
+  // asyncio.gather / Promise.all, CrewAI's Process.parallel — all default to
+  // parallel fan-out. The trade-off is N× tokens + potential rate-limit
+  // storms; we cap with MAX_PARALLEL_AGENTS below.
+  const filtered = targets
+    .filter((m) => !isAgentFlooding(params.roomId, m.id))
+    .slice(0, MAX_PARALLEL_AGENTS);
+  if (filtered.length < targets.length) {
+    sendAll("system.warning", {
       roomId: params.roomId,
-      agentId: m.id,
-      prompt: params.content,
-      parentMessageId: params.parentMessageId,
-      source: params.source,
+      reason: "concurrency-cap",
+      requested: targets.length,
+      invoked: filtered.length,
     });
   }
+
+  // For agent→agent handoff, append the task description so the next agent
+  // knows why they were invoked.
+  const prompt = params.handoffTask
+    ? `${params.content}\n\n[handoff task — ${params.authorId}]: ${params.handoffTask}`
+    : params.content;
+
+  await Promise.allSettled(
+    filtered.map((m) =>
+      invokeAgentAsync({
+        roomId: params.roomId,
+        agentId: m.id,
+        prompt,
+        parentMessageId: params.parentMessageId,
+        source: params.source,
+      })
+    )
+  );
 }
 
 function currentDepth(roomId: string): number {
@@ -209,7 +322,14 @@ async function invokeAgentAsync(opts: {
       const id = nanoid();
       const finishedAt = ts();
       const tags = extractTags(result.content);
-      const mentionedAgents = extractMentions(result.content);
+      // Routing targets come from the structured ```handoff``` block — see
+      // extractHandoff. Prose @mentions are still extracted for display
+      // purposes (UI shows "@Lens" pills) but never drive routing.
+      const handoff = extractHandoff(result.content);
+      const mentionedAgents = handoff ? handoff.to : extractMentions(result.content);
+      // Display content strips the handoff metadata block so the user sees
+      // only the agent's prose reply.
+      const displayContent = stripHandoff(result.content);
       db.prepare(`
         INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, parent_id, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -217,7 +337,7 @@ async function invokeAgentAsync(opts: {
         id,
         opts.roomId,
         opts.agentId,
-        result.content,
+        displayContent,
         JSON.stringify(tags),
         JSON.stringify(mentionedAgents.map((m) => m.id)),
         opts.parentMessageId ?? null,
@@ -228,7 +348,7 @@ async function invokeAgentAsync(opts: {
         id,
         roomId: opts.roomId,
         authorId: opts.agentId,
-        content: result.content,
+        content: displayContent,
         tags,
         mentionedAgentIds: mentionedAgents.map((m) => m.id),
         parentId: opts.parentMessageId,
@@ -244,13 +364,16 @@ async function invokeAgentAsync(opts: {
         timestamp: finishedAt,
       });
 
-      // Forward ONLY on explicit @-mentions in the agent's reply.
+      // Forward ONLY on explicit structured handoff in the agent's reply.
+      // Prose @mentions no longer drive routing (see triggerOnMessage).
       await triggerOnMessage({
         roomId: opts.roomId,
         authorId: opts.agentId,
         content: result.content,
         parentMessageId: id,
         source: opts.source ?? "agent",
+        explicitTargets: handoff?.to,
+        handoffTask: handoff?.task,
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

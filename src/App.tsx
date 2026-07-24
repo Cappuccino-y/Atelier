@@ -397,7 +397,10 @@ export default function App() {
   const handleCreateRoom = useCallback(async (body: { name: string; topic: string; projectId?: string }) => {
     try {
       const room = await api.createRoom(body);
-      setRooms(curr => [room, ...curr]);
+      setRooms(curr => {
+        const exists = curr.some(x => x.id === room.id);
+        return exists ? curr.map(x => x.id === room.id ? room : x) : [room, ...curr];
+      });
       setCurrentRoomId(room.id);
       setCreateOpen(false);
     } catch (err) {
