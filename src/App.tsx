@@ -268,6 +268,7 @@ export default function App() {
             kind: "agent.tool_call",
             agentId: p.agentId,
             message: p.tool,
+            meta: { tool: p.tool },
           });
           break;
         }

@@ -118,41 +118,39 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 
     const emit = opts.onEvent;
 
-    // line-buffered parser: opencode emits one JSON object per stdout chunk
-    let lineBuf = "";
-    const handleLine = (line: string) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const obj = JSON.parse(trimmed) as {
-          type?: string;
-          part?: { type?: string; text?: string; tool?: string; state?: { input?: unknown; output?: unknown; title?: string } };
-          error?: { message?: string } | string;
-        };
-        const partType = obj.part?.type;
-        if (obj.type === "step_start") {
-          emit?.({ type: "step_start", step: partType ?? "step" });
-        } else if (obj.type === "text" && typeof obj.part?.text === "string") {
-          emit?.({ type: "text_delta", delta: obj.part.text });
-        } else if (obj.type === "tool_use" || partType === "tool") {
-          emit?.({
-            type: "tool_use",
-            tool: obj.part?.tool ?? "tool",
-            input: obj.part?.state?.input,
-            output: obj.part?.state?.output,
-          });
-        } else if (obj.type === "step_finish") {
-          const reason = (obj.part as { reason?: string })?.reason ?? "stop";
-          emit?.({ type: "step_finish", reason });
-        } else if (obj.type === "error") {
-          const msg = typeof obj.error === "string"
-            ? obj.error
-            : (obj.error?.message ?? "opencode error");
-          emit?.({ type: "error", message: msg });
-        }
-      } catch {
-        // raw text fallback for non-JSON lines (single-shot CLI mode)
-        if (trimmed) emit?.({ type: "text_delta", delta: trimmed + "\n" });
+    // brace-balanced JSON parser: opencode emits concatenated JSON objects whose
+    // string values (text deltas, tool state.output) often contain literal
+    // newlines. A naive split-by-line approach shreds those objects and falls
+    // back to emitting raw JSON fragments as text_delta, polluting the agent's
+    // message body. Walk the buffer tracking `{}` depth + string/escape state
+    // so embedded newlines don't break us.
+    let jsonBuf = "";
+    const handleObj = (obj: any) => {
+      const o = obj as {
+        type?: string;
+        part?: { type?: string; text?: string; tool?: string; state?: { input?: unknown; output?: unknown; title?: string } };
+        error?: { message?: string } | string;
+      };
+      const partType = o.part?.type;
+      if (o.type === "step_start") {
+        emit?.({ type: "step_start", step: partType ?? "step" });
+      } else if (o.type === "text" && typeof o.part?.text === "string") {
+        emit?.({ type: "text_delta", delta: o.part.text });
+      } else if (o.type === "tool_use" || partType === "tool") {
+        emit?.({
+          type: "tool_use",
+          tool: o.part?.tool ?? "tool",
+          input: o.part?.state?.input,
+          output: o.part?.state?.output,
+        });
+      } else if (o.type === "step_finish") {
+        const reason = (o.part as { reason?: string })?.reason ?? "stop";
+        emit?.({ type: "step_finish", reason });
+      } else if (o.type === "error") {
+        const msg = typeof o.error === "string"
+          ? o.error
+          : (o.error?.message ?? "opencode error");
+        emit?.({ type: "error", message: msg });
       }
     };
 
@@ -160,12 +158,14 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       child.stdout.on("data", (d) => {
         const chunk = d.toString();
         stdout += chunk;
-        lineBuf += chunk;
-        let nl = lineBuf.indexOf("\n");
-        while (nl >= 0) {
-          handleLine(lineBuf.slice(0, nl));
-          lineBuf = lineBuf.slice(nl + 1);
-          nl = lineBuf.indexOf("\n");
+        jsonBuf += chunk;
+        // drain all complete objects currently in the buffer
+        let progress = true;
+        while (progress) {
+          const { consumed, objects } = consumeJsonObjects(jsonBuf);
+          for (const obj of objects) handleObj(obj);
+          jsonBuf = jsonBuf.slice(consumed);
+          progress = objects.length > 0;
         }
       });
     }
@@ -186,8 +186,12 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 
-      // flush trailing line if any
-      if (lineBuf.trim()) handleLine(lineBuf);
+      // flush any leftover JSON objects in the buffer
+      {
+        const { objects } = consumeJsonObjects(jsonBuf);
+        for (const obj of objects) handleObj(obj);
+        jsonBuf = "";
+      }
 
       if (aborted) {
         resolve({ content: stdout, success: false, error: "aborted by user", cancelled: true });
@@ -220,32 +224,21 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 }
 
 export function parseOpenCodeOutput(stdout: string): AgentRunResult {
-  const lines = stdout.split(/\r?\n/);
+  const { objects: events } = consumeJsonObjects(stdout);
   const textParts: string[] = [];
-  const events: unknown[] = [];
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const obj = JSON.parse(trimmed) as {
-        type?: unknown;
-        text?: unknown;
-        part?: { type?: unknown; text?: unknown };
-        error?: unknown;
-      };
-      events.push(obj);
-      // opencode json format: { "type":"text", "part": { "type":"text", "text":"..." } }
-      const partText = obj.part?.text;
-      if (obj.type === "text" && typeof partText === "string") {
-        textParts.push(partText);
-      } else if (obj.type === "text" && typeof obj.text === "string") {
-        // fallback for older formats
-        textParts.push(obj.text);
-      }
-    } catch {
-      // non-JSON lines: treat as raw text (single-shot CLI mode)
-      textParts.push(trimmed);
+  for (const obj of events as Array<{
+    type?: unknown;
+    text?: unknown;
+    part?: { type?: unknown; text?: unknown };
+  }>) {
+    // opencode json format: { "type":"text", "part": { "type":"text", "text":"..." } }
+    const partText = obj.part?.text;
+    if (obj.type === "text" && typeof partText === "string") {
+      textParts.push(partText);
+    } else if (obj.type === "text" && typeof obj.text === "string") {
+      // fallback for older formats
+      textParts.push(obj.text);
     }
   }
 
@@ -255,6 +248,68 @@ export function parseOpenCodeOutput(stdout: string): AgentRunResult {
     success: content.length > 0,
     rawEvents: events,
   };
+}
+
+/**
+ * Consume all complete top-level JSON objects from the start of `buf`.
+ *
+ * opencode's `--format json` mode emits concatenated JSON events with no
+ * delimiter; each event is one `{...}` whose string values may contain
+ * literal newlines (multi-line text deltas, pretty-printed tool output).
+ * Splitting by `\n` shreds them. We walk the buffer tracking brace depth
+ * and string/escape state, returning each completed object. Malformed
+ * regions are skipped past so a single bad event doesn't deadlock the
+ * stream.
+ */
+function consumeJsonObjects(buf: string): { consumed: number; objects: any[] } {
+  const objects: any[] = [];
+  let cursor = 0;
+
+  while (cursor < buf.length) {
+    // skip whitespace / delimiters between events
+    let objStart = cursor;
+    while (objStart < buf.length && buf[objStart] !== "{") objStart++;
+    if (objStart >= buf.length) {
+      return { consumed: buf.length, objects };
+    }
+
+    // find the matching closing `}` respecting strings + escapes
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let i = objStart;
+    for (; i < buf.length; i++) {
+      const c = buf[i];
+      if (escape) { escape = false; continue; }
+      if (inString) {
+        if (c === "\\") { escape = true; continue; }
+        if (c === '"') { inString = false; continue; }
+        continue;
+      }
+      if (c === '"') { inString = true; continue; }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+
+    if (i >= buf.length) {
+      // incomplete object — preserve from objStart so we retry after more data
+      return { consumed: objStart, objects };
+    }
+
+    const candidate = buf.slice(objStart, i + 1);
+    try {
+      objects.push(JSON.parse(candidate));
+      cursor = i + 1;
+    } catch {
+      // malformed JSON at this boundary — skip past and try the next object
+      cursor = i + 1;
+    }
+  }
+
+  return { consumed: buf.length, objects };
 }
 
 /* ---- registry for cross-process cancellation ----------------------------- */
