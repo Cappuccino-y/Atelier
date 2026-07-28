@@ -261,7 +261,7 @@ export function parseOpenCodeOutput(stdout: string): AgentRunResult {
  * regions are skipped past so a single bad event doesn't deadlock the
  * stream.
  */
-function consumeJsonObjects(buf: string): { consumed: number; objects: any[] } {
+export function consumeJsonObjects(buf: string): { consumed: number; objects: any[] } {
   const objects: any[] = [];
   let cursor = 0;
 
