@@ -1,4 +1,4 @@
-# atelier.ps1 - master controller
+﻿# atelier.ps1 - master controller
 # Usage:
 #   atelier            -> start (default)
 #   atelier start      -> kill old port procs + start all + open browser
@@ -6,6 +6,9 @@
 #   atelier restart    -> stop + start
 #   atelier status     -> show port bindings
 #   atelier logs <n>   -> tail logs (server|frontend|proserpina)
+#   atelier deploy     -> one-click env setup (forwarded to deploy.ps1)
+#     flags forwarded as-is:
+#       -Start  -InstallOpencode  -ForceAgents  -SkipPython  -DryRun  -ForceConfig
 
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
@@ -195,5 +198,32 @@ switch ($cmd) {
   "restart" { Stop-AtelierPorts; Start-Atelier }
   "status"  { Show-Status }
   "logs"    { if ($Args.Count -lt 2) { Say "usage: atelier logs <server|frontend|proserpina>" "Yellow" } else { Show-Logs $Args[1] } }
-  default   { Say "usage: atelier [start|stop|restart|status|logs <name>]" "Yellow" }
+  "deploy"  {
+    $deploy = Join-Path $ScriptDir "deploy.ps1"
+    if (-not (Test-Path $deploy)) {
+      Say "[atelier] deploy.ps1 not found at $deploy" "Red"
+      exit 1
+    }
+    # Forward remaining args. PowerShell 5.1's parameter binder doesn't
+    # accept switch parameters via array splatting (`@('-DryRun')`),
+    # so we build a hashtable from `-Name` tokens explicitly.
+    $forward = @{}
+    if ($Args.Count -gt 1) {
+      for ($i = 1; $i -lt $Args.Count; $i++) {
+        $tok = $Args[$i]
+        if ($tok.StartsWith("-") -and $tok.Length -gt 1) {
+          $name = $tok.Substring(1)
+          # known deploy.ps1 switches
+          if ($name -in @("Start","InstallOpencode","ForceAgents","SkipPython","DryRun","ForceConfig")) {
+            $forward[$name] = $true
+          } else {
+            Say "[atelier] unknown deploy flag: $tok" "Yellow"
+          }
+        }
+      }
+    }
+    & $deploy @forward
+  }
+  "help"    { Say "usage: atelier [start|stop|restart|status|logs <name>|deploy]" "Yellow" }
+  default   { Say "usage: atelier [start|stop|restart|status|logs <name>|deploy]" "Yellow" }
 }

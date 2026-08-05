@@ -1,5 +1,5 @@
 import { db } from "../db.js";
-import { config } from "../config.js";
+import { config, resolveAgentModel } from "../config.js";
 import { runOpenCodeAgent, type AgentEvent, type AgentRunResult } from "./process-agent.js";
 import { buildSystemPrompt } from "./prompts.js";
 
@@ -49,9 +49,11 @@ export async function invokeAgent(opts: {
   const basePrompt = buildSystemPrompt(opts.agentId);
   const enriched = enrichForHandoff(opts.roomId, opts.agentId, `${basePrompt}\n\n${opts.prompt}`);
   const ocAgent = config.agentMapping[opts.agentId] ?? opts.agentId;
+  const model = resolveAgentModel(opts.agentId);
   const result = await runOpenCodeAgent({
     agentName: opts.agentId,
     opencodeAgent: ocAgent,
+    model,
     prompt: enriched,
     onEvent: opts.onEvent,
     signal: opts.signal,

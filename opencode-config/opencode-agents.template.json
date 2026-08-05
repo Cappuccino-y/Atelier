@@ -1,0 +1,104 @@
+{
+  "_comment": "Partial opencode.json template — only the 'agent' block. The deploy script DEEP-MERGES this into ~/.config/opencode/opencode.json, preserving your existing provider/mcp/plugin blocks. To add new agents, drop a *.md into opencode-config/agents/ and add an entry here.",
+  "agent": {
+    "atlas": {
+      "description": "Atlas 编排者 — 纯路由，只分解任务并 @mention worker；绝不动手",
+      "mode": "primary",
+      "model": "custom-saas/minimax-MiniMax-M3-cp",
+      "prompt": "{file:./agents/atlas.md}",
+      "temperature": 0.2,
+      "permission": {
+        "skill": { "*": "deny" },
+        "bash": "deny",
+        "edit": "deny",
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "list": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "lsp": "deny",
+        "task": "deny",
+        "todowrite": "deny",
+        "question": "deny",
+        "external_directory": "allow",
+        "doom_loop": "allow"
+      }
+    },
+    "lens": {
+      "description": "Lens 审查只读，专注找问题、出 review",
+      "mode": "primary",
+      "model": "custom-saas/minimax-MiniMax-M3-cp",
+      "prompt": "{file:./agents/lens.md}",
+      "temperature": 0.1,
+      "permission": {
+        "skill": { "*": "deny" },
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": { "*": "allow", "*.env": "allow", "*.env.*": "allow" },
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "lsp": "allow",
+        "task": "deny",
+        "todowrite": "deny",
+        "question": "deny",
+        "external_directory": "allow",
+        "doom_loop": "allow"
+      }
+    },
+    "echo": {
+      "description": "Echo 通用支持 — 只读，处理日常事务、汇总背景",
+      "mode": "primary",
+      "model": "custom-saas/minimax-MiniMax-M3-cp",
+      "prompt": "{file:./agents/echo.md}",
+      "temperature": 0.3,
+      "permission": {
+        "skill": { "*": "deny" },
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "lsp": "allow",
+        "task": "deny",
+        "todowrite": "deny",
+        "question": "deny",
+        "external_directory": "allow",
+        "doom_loop": "allow"
+      }
+    },
+    "trainer": {
+      "description": "Trainer 经验固化者 — 只读，管理团队共享 knowledge base / best practice / 模板",
+      "mode": "primary",
+      "model": "custom-saas/minimax-MiniMax-M3-cp",
+      "prompt": "{file:./agents/trainer.md}",
+      "temperature": 0.1,
+      "permission": {
+        "skill": { "*": "deny" },
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "lsp": "allow",
+        "task": "deny",
+        "todowrite": "deny",
+        "question": "deny",
+        "external_directory": "allow",
+        "doom_loop": "allow"
+      }
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://atelier.local/agent-models.schema.json",
+  "title": "Atelier agent-models configuration",
+  "description": "Maps each Atelier agent id to an opencode model key. Edit freely; takes effect on next server start.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "default": {
+      "type": "string",
+      "description": "Fallback model key for any agent id not listed in 'models'."
+    },
+    "models": {
+      "type": "object",
+      "description": "Per-agent model overrides. Key = agent id (atlas, forge, lens, echo, trainer, ...). Value = model key from opencode.json provider section.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "presets": {
+      "type": "object",
+      "description": "Named model aliases you can reference by 'preset:<name>' in the 'models' map.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "notes": {
+      "type": "object",
+      "description": "Free-form documentation. Ignored at runtime.",
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "default": "custom-saas/minimax-MiniMax-M3-cp",
+      "models": {
+        "atlas": "preset:fast",
+        "forge": "custom-saas/minimax-MiniMax-M3-cp",
+        "lens": "comagic/kimi-k2.6-saas"
+      }
+    }
+  ]
+}
