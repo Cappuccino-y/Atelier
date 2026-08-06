@@ -3,6 +3,7 @@ import { writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, resolveAgentModel, reloadAgentModelsConfig, type AgentModelsConfig } from "../config.js";
+import { walkProvenanceChain } from "../agents/retry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -107,4 +108,19 @@ export async function routes(app: FastifyInstance) {
     const reloaded = reloadAgentModelsConfig();
     return { ok: true, config: reloaded };
   });
+
+  /**
+   * Walk the provenance chain for a given messageId. Used by the UI
+   * to render "show full handoff tree" for a task.
+   */
+  app.get<{ Params: { messageId: string }; Querystring: { maxDepth?: string } }>(
+    "/api/runtime/handoff-chain/:messageId",
+    async (req, reply) => {
+      const { messageId } = req.params;
+      const maxDepth = req.query.maxDepth ? parseInt(req.query.maxDepth, 10) : 50;
+      if (!messageId) return reply.code(400).send({ error: "messageId required" });
+      const chain = walkProvenanceChain(messageId, maxDepth);
+      return { messageId, depth: chain.length, chain };
+    },
+  );
 }

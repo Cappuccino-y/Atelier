@@ -110,53 +110,84 @@ ${entry.content}
 /**
  * Parse a memory file back into structured entries. Tolerant of
  * hand-edited / partial files.
+ *
+ * A single entry's free-text content can itself contain a literal `---`
+ * line, so naive split-per-token parsing would truncate the entry at the
+ * first embedded separator. Instead we re-join fragments that belong to
+ * the same entry: the fragment carrying `memoryId:` starts a new entry,
+ * subsequent non-empty fragments are appended back onto it.
  */
 export function parseMemoryFile(content: string): Array<{ id: string; ts: number; entry: MemoryEntry }> {
   const out: Array<{ id: string; ts: number; entry: MemoryEntry }> = [];
-  const blocks = content.split(/^---\s*$/m);
-  for (const block of blocks) {
-    const trimmed = block.trim();
-    if (!trimmed.startsWith("memoryId:")) continue;
-    const idLine = trimmed.match(/^memoryId:\s*(\S+)/m);
-    const tsLine = trimmed.match(/^timestamp:\s*(\S+)/m);
-    const scopeLine = trimmed.match(/^scope:\s*(\S+)/m);
-    const catLine = trimmed.match(/^category:\s*(\S+)/m);
-    const titleLine = trimmed.match(/^title:\s*(.+)$/m);
-    const tagsLine = trimmed.match(/^tags:\s*\[([^\]]*)\]/m);
-    const confLine = trimmed.match(/^confidence:\s*(\S+)/m);
-    const srcMsgLine = trimmed.match(/^source\.messageIds:\s*(.+)$/m);
-    const srcAgentLine = trimmed.match(/^source\.agentIds:\s*(.+)$/m);
-    if (!idLine || !scopeLine || !catLine || !titleLine) continue;
 
-    const bodyStart = trimmed.indexOf("\n\n");
-    const body = bodyStart >= 0 ? trimmed.slice(bodyStart).trim() : "";
-
-    const scope = parseScope(scopeLine[1]);
-    if (!scope) continue;
-    const confidenceRaw = confLine?.[1] ?? "medium";
-    const confidence = (confidenceRaw === "high" || confidenceRaw === "medium" || confidenceRaw === "low")
-      ? confidenceRaw
-      : "medium";
-
-    const tags = (tagsLine?.[1] ?? "")
-      .split(",").map((t) => t.trim()).filter(Boolean);
-
-    const entry: MemoryEntry = {
-      scope: scopeLine[1],
-      category: catLine[1],
-      title: titleLine[1].trim(),
-      content: body,
-      tags,
-      confidence,
-      source: {
-        messageIds: (srcMsgLine?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s && s !== "—"),
-        agentIds: (srcAgentLine?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s && s !== "—"),
-      },
-    };
-    const ts = tsLine ? Date.parse(tsLine[1]) : Date.now();
-    out.push({ id: idLine[1], ts: Number.isFinite(ts) ? ts : Date.now(), entry });
+  const tokens = content.split(/^---\s*$/m);
+  let rawBlock = "";
+  let inBlock = false;
+  const flush = () => {
+    if (!inBlock) return;
+    const parsed = parseMemoryBlock(rawBlock);
+    if (parsed) out.push(parsed);
+    rawBlock = "";
+    inBlock = false;
+  };
+  for (const token of tokens) {
+    if (token.trim().startsWith("memoryId:")) {
+      flush();
+      rawBlock = token;
+      inBlock = true;
+    } else if (inBlock && token.trim().length > 0) {
+      rawBlock += "\n---\n" + token;
+    }
   }
+  flush();
   return out;
+}
+
+/**
+ * Parse a single `---`-delimited memory entry block (may span multiple
+ * fragments when the content body contains literal `---` lines).
+ */
+function parseMemoryBlock(block: string): { id: string; ts: number; entry: MemoryEntry } | null {
+  const trimmed = block.trim();
+  if (!trimmed.startsWith("memoryId:")) return null;
+  const idLine = trimmed.match(/^memoryId:\s*(\S+)/m);
+  const tsLine = trimmed.match(/^timestamp:\s*(\S+)/m);
+  const scopeLine = trimmed.match(/^scope:\s*(\S+)/m);
+  const catLine = trimmed.match(/^category:\s*(\S+)/m);
+  const titleLine = trimmed.match(/^title:\s*(.+)$/m);
+  const tagsLine = trimmed.match(/^tags:\s*\[([^\]]*)\]/m);
+  const confLine = trimmed.match(/^confidence:\s*(\S+)/m);
+  const srcMsgLine = trimmed.match(/^source\.messageIds:\s*(.+)$/m);
+  const srcAgentLine = trimmed.match(/^source\.agentIds:\s*(.+)$/m);
+  if (!idLine || !scopeLine || !catLine || !titleLine) return null;
+
+  const bodyStart = trimmed.indexOf("\n\n");
+  const body = bodyStart >= 0 ? trimmed.slice(bodyStart).trim() : "";
+
+  const scope = parseScope(scopeLine[1]);
+  if (!scope) return null;
+  const confidenceRaw = confLine?.[1] ?? "medium";
+  const confidence = (confidenceRaw === "high" || confidenceRaw === "medium" || confidenceRaw === "low")
+    ? confidenceRaw
+    : "medium";
+
+  const tags = (tagsLine?.[1] ?? "")
+    .split(",").map((t) => t.trim()).filter(Boolean);
+
+  const entry: MemoryEntry = {
+    scope: scopeLine[1],
+    category: catLine[1],
+    title: titleLine[1].trim(),
+    content: body,
+    tags,
+    confidence,
+    source: {
+      messageIds: (srcMsgLine?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s && s !== "—"),
+      agentIds: (srcAgentLine?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s && s !== "—"),
+    },
+  };
+  const ts = tsLine ? Date.parse(tsLine[1]) : Date.now();
+  return { id: idLine[1], ts: Number.isFinite(ts) ? ts : Date.now(), entry };
 }
 
 /**
@@ -285,9 +316,10 @@ export function isDeprecated(entry: MemoryEntry): boolean {
   if (t.startsWith("[memory:deprecate]")) return true;
   if (/\bdeprecated\b/.test(t)) return true;
   if (/已废弃|已弃用/.test(entry.title)) return true;
-  // Any entry that has been superseded is deprecated (the entry itself
-  // is the newer one; the older one is filtered by the supersededBy chain).
-  if (typeof entry.supersedes === "string" && entry.supersedes.length > 0) return true;
+  // NOTE: an entry that carries `supersedes` is the NEWER replacement for an
+  // older entry — it is NOT deprecated itself. The older entry it replaces
+  // is excluded via the supersedes chain in loadRelevantMemory (the caller
+  // adds `c.entry.supersedes` to deprecatedIds), not here.
   return false;
 }
 
@@ -491,12 +523,19 @@ export function formatMemoryBlock(entries: Array<{ id: string; ts: number; entry
     const date = new Date(ts).toISOString().slice(0, 10);
     lines.push(`## ${scopeToLabel(parseScope(entry.scope) ?? { kind: "global" })} (${date}, ${entry.category}, ${entry.confidence})`);
     lines.push(`### ${entry.title}`);
-    lines.push(entry.content);
+    lines.push(truncate(entry.content, MAX_INJECT_CONTENT));
     if (entry.tags.length > 0) lines.push(`tags: [${entry.tags.join(", ")}]`);
     lines.push("---");
   }
   lines.push("[END MEMORY]");
   return lines.join("\n");
+}
+
+/** Cap per-entry content in the injected block so KB growth can't blow up prompts. */
+const MAX_INJECT_CONTENT = 600;
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
 export const MEMORY_DIR_PATH = MEMORY_DIR;

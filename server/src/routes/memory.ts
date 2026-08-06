@@ -14,12 +14,11 @@ import type { FastifyInstance } from "fastify";
 import {
   listAllMemory,
   memoryStats,
-  loadRelevantMemory,
   deprecateMemoryEntry,
   parseScope,
+  isDeprecated,
   type MemoryScope,
 } from "../agents/memory.js";
-import { walkProvenanceChain } from "../agents/retry.js";
 
 export async function routes(app: FastifyInstance) {
   app.get("/api/memory/list", async (req) => {
@@ -32,8 +31,7 @@ export async function routes(app: FastifyInstance) {
       if (wantedScope) entries = entries.filter((e) => scopeMatches(e.scope, wantedScope));
     }
     if (!includeDeprecated) {
-      // Cheap deprecation check by title/content prefix.
-      entries = entries.filter((e) => !e.entry.title.startsWith("[MEMORY:DEPRECATE]"));
+      entries = entries.filter((e) => !isDeprecated(e.entry));
     }
     return {
       count: entries.length,
@@ -60,7 +58,6 @@ export async function routes(app: FastifyInstance) {
     "/api/memory/search",
     async (req) => {
       const q = req.query.q ?? "";
-      const agentId = req.query.agentId ?? "atlas";
       const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
       // For search, we want ALL scopes (room + global + agent + project)
       // weighted equally, scored against `q`. We approximate by scanning
@@ -121,21 +118,6 @@ export async function routes(app: FastifyInstance) {
     const { MEMORY_DIR_PATH } = await import("../agents/memory.js");
     return { path: MEMORY_DIR_PATH };
   });
-
-  /**
-   * Walk the provenance chain for a given messageId. Used by the UI
-   * to render "show full handoff tree" for a task.
-   */
-  app.get<{ Params: { messageId: string }; Querystring: { maxDepth?: string } }>(
-    "/api/runtime/handoff-chain/:messageId",
-    async (req, reply) => {
-      const { messageId } = req.params;
-      const maxDepth = req.query.maxDepth ? parseInt(req.query.maxDepth, 10) : 50;
-      if (!messageId) return reply.code(400).send({ error: "messageId required" });
-      const chain = walkProvenanceChain(messageId, maxDepth);
-      return { messageId, depth: chain.length, chain };
-    },
-  );
 }
 
 function scopeToString(s: MemoryScope): string {
