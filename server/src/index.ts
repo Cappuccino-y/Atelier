@@ -5,6 +5,7 @@ import type { WebSocket } from "@fastify/websocket";
 import "./db.js";
 import { registerSocket } from "./broadcast.js";
 import { config } from "./config.js";
+import { ensureOpencodeAgents } from "./opencode-config.js";
 
 const routeNames = [
   "rooms",
@@ -97,6 +98,25 @@ async function configureApp(fastify: FastifyInstance) {
 
 async function start() {
   try {
+    // Keep the opencode CLI config in sync with Atelier's bundled agents.
+    // Missing agents (e.g. writer/scout/analyst on an upgrade) get merged
+    // into ~/.config/opencode/opencode.json so opencode run --agent <name>
+    // finds them. provider/mcp/plugin blocks are preserved untouched.
+    try {
+      const sync = ensureOpencodeAgents();
+      if (sync.merged.length > 0) {
+        app.log.info(`[opencode-config] merged agents: ${sync.merged.join(", ")}`);
+      }
+      if (sync.copied.length > 0) {
+        app.log.info(`[opencode-config] copied prompt files: ${sync.copied.join(", ")}`);
+      }
+      if (sync.skipped) {
+        app.log.warn(`[opencode-config] skipped: ${sync.skipReason}`);
+      }
+    } catch (err) {
+      app.log.warn({ err }, "[opencode-config] sync failed (non-fatal)");
+    }
+
     await configureApp(app);
     await app.listen({ port: config.port, host: config.host });
   } catch (error) {
