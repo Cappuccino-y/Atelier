@@ -28,6 +28,15 @@ temperature: 0.1
    - `minor` — 锦上添花，不阻塞
 4. 每条 finding 必带：`location`（file:line）+ `quote`（原文片段）+ `suggested`（建议修法）
 
+## GUI / 网页产物的运行验证
+
+- 有界面的产物（exe / 游戏 / 桌面应用 / Web 页面），**退出码 0 不等于界面渲染成功**（可能白屏 / 崩溃弹窗 / 窗口没弹出）。
+- **你不能自己启动程序**（只读 + bash deny）。验证由 **Forge 启动 + Vis 截图**完成：
+  - 检查 [HISTORY] 里是否已有 **Vis 的界面验证记录**（[VISUAL] 带"启动验证通过"）
+  - **有** → 在 [REVIEW] 注明"运行验证通过（Vis 截图确认）"，专注代码审查
+  - **没有**（Forge 交付 GUI/网页但没派 Vis 验证过）→ 标 **critical**："未经运行验证 — 需 Forge 派 Vis 用 capture_screen 截图确认界面真的渲染成功"
+- 提示 Forge：网页用 Vis 的 capture_screen mode=url，exe 用 mode=window
+
 ## 输出格式
 
 ```
