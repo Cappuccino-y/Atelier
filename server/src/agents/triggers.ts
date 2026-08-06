@@ -414,6 +414,7 @@ async function invokeAgentAsync(opts: {
       const id = nanoid();
       const finishedAt = ts();
       const tags = extractTags(result.content);
+      const cancelled = Boolean(result.cancelled);
 
       // Routing targets come from the structured ```handoff``` block — see
       // parseHandoff. Prose @mentions are still extracted for display
@@ -443,7 +444,10 @@ async function invokeAgentAsync(opts: {
       };
       let echoFallback: HandoffDirectiveV2 | null = null;
       let validationFailed = false;
-      if (requiredSchema && !validateOutputAgainstSchema(result.content, requiredSchema)) {
+      // A cancelled run (Stop button) is a deliberate user interrupt, not a
+      // failure — skip schema validation entirely so it doesn't trigger an
+      // echo fallback (which would make the stop look like a crash).
+      if (!cancelled && requiredSchema && !validateOutputAgainstSchema(result.content, requiredSchema)) {
         validationFailed = true;
         sendAll("system.warning", {
           roomId: opts.roomId,
@@ -528,6 +532,10 @@ async function invokeAgentAsync(opts: {
       if (!displayContent && emittedHandoff) {
         const names = emittedHandoff.to.map((t) => t.name).join(", ");
         displayContent = `[派发 → ${names}]${emittedHandoff.taskSummary ? ` ${emittedHandoff.taskSummary}` : ""}`;
+      }
+      if (cancelled) {
+        const stopped = displayContent ? `\n\n_(已停止 — 回复被中断)_` : `_(已停止 — 回复被中断)_`;
+        displayContent = (displayContent ? displayContent : "") + stopped;
       }
       db.prepare(`
         INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, parent_id, timestamp)

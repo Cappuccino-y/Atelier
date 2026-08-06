@@ -10,7 +10,7 @@ import {
 import { parseMemoryEntry } from "./handoff.js";
 
 const HISTORY_LIMIT = 30;
-const CONTENT_TRUNCATE = 800;
+const OTHER_TRUNCATE = 800;
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
@@ -26,10 +26,17 @@ export function loadRoomThread(roomId: string, agentId: string): ChatMessage[] {
     ORDER BY timestamp DESC LIMIT ?
   `).all(roomId, HISTORY_LIMIT) as Row[];
 
-  return rows.reverse().map((m) => ({
-    role: m.author_id === agentId ? "assistant" : "user",
-    content: `[${m.author_id} ${new Date(m.timestamp).toLocaleTimeString()}]\n${truncate(m.content, CONTENT_TRUNCATE)}`,
-  }));
+  return rows.reverse().map((m) => {
+    const isSelf = m.author_id === agentId;
+    return {
+      role: isSelf ? "assistant" : "user",
+      // Own history stays intact so multi-round tasks keep full continuity;
+      // other agents' / the user's messages are capped to save context budget.
+      content: `[${m.author_id} ${new Date(m.timestamp).toLocaleTimeString()}]\n${
+        isSelf ? m.content : truncate(m.content, OTHER_TRUNCATE)
+      }`,
+    };
+  });
 }
 
 /**

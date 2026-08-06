@@ -192,11 +192,30 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       }
 
       if (aborted) {
-        resolve({ content: stdout, success: false, error: "aborted by user", cancelled: true });
+        // The agent was stopped (Stop button). Content should be the
+        // streamed text so far, NOT the raw JSON event stream — dumping
+        // stdout here pollutes the message with `{"type":"step_start",...}`
+        // JSON and makes the reply look like a crash. Parse it like a
+        // normal completion, then mark it cancelled.
+        const partial = parseOpenCodeOutput(stdout);
+        resolve({
+          content: partial.content,
+          success: false,
+          error: "aborted by user",
+          cancelled: true,
+          rawEvents: partial.rawEvents,
+        });
         return;
       }
       if (killed) {
-        resolve({ content: stdout, success: false, error: `timeout after ${timeoutMs}ms` });
+        // Same reasoning as abort: surface the streamed text, not raw JSON.
+        const partial = parseOpenCodeOutput(stdout);
+        resolve({
+          content: partial.content,
+          success: false,
+          error: `timeout after ${timeoutMs}ms`,
+          rawEvents: partial.rawEvents,
+        });
         return;
       }
 
