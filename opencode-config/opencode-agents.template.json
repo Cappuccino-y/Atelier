@@ -230,7 +230,7 @@
         "skill": {
           "*": "deny"
         },
-        "bash": "deny",
+        "bash": "allow",
         "edit": "deny",
         "write": "deny",
         "read": "allow",
