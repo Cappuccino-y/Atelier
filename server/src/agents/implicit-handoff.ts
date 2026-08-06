@@ -33,7 +33,7 @@ import { nanoid } from "nanoid";
 
 /**
  * Lowercase author id of the producing agent (atlas / forge / lens /
- * scout / analyst / writer / archivist / vis / echo / trainer / user).
+ * scout / analyst / writer / archivist / echo / trainer / user).
  */
 export type AgentId = string;
 
@@ -241,34 +241,34 @@ const IMPLICIT_RULES: ImplicitRule[] = [
     }],
   },
 
-  // -- Vis output --
+  // -- Lens visual output (was Vis) --
   {
-    name: "vis_error_to_analyst",
+    name: "lens_visual_error_to_analyst",
     match: ({ from, tags, content }) =>
-      from === "vis" && tags.includes("VISUAL") && /error|错误|null|N\/A/i.test(content),
+      from === "lens" && tags.includes("VISUAL") && /error|错误|null|N\/A/i.test(content),
     targets: () => [{
       agentId: "analyst",
       requiredOutputSchema: "analysis",
-      reason: "Vis 检测到错误 → 派 Analyst 分析根因",
+      reason: "Lens 视觉检测到错误 → 派 Analyst 分析根因",
     }],
   },
   {
-    name: "vis_design_to_writer",
+    name: "lens_visual_design_to_writer",
     match: ({ from, tags, content }) =>
-      from === "vis" && tags.includes("VISUAL") && /mockup|design|设计/i.test(content),
+      from === "lens" && tags.includes("VISUAL") && /mockup|design|设计/i.test(content),
     targets: () => [{
       agentId: "writer",
       requiredOutputSchema: "document",
-      reason: "Vis 设计稿 → 派 Writer 出规范文档",
+      reason: "Lens 视觉设计稿 → 派 Writer 出规范文档",
     }],
   },
   {
-    name: "vis_conclude",
-    match: ({ from, tags }) => from === "vis" && tags.includes("VISUAL"),
+    name: "lens_visual_conclude",
+    match: ({ from, tags }) => from === "lens" && tags.includes("VISUAL"),
     targets: () => [{
       agentId: "atlas",
       requiredOutputSchema: "decision_block",
-      reason: "Vis 输出 → 派 Atlas 收尾",
+      reason: "Lens 视觉输出 → 派 Atlas 收尾",
     }],
   },
 

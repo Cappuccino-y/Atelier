@@ -2,12 +2,12 @@
  * opencode-config.ts — auto-sync Atelier's bundled agent definitions into
  * the user's `~/.config/opencode/opencode.json` on every server start.
  *
- * Problem this solves: Atelier ships 10 agents (atlas/forge/lens/echo/
- * trainer/scout/analyst/writer/archivist/vis) but the opencode CLI that
+ * Problem this solves: Atelier ships 9 agents (atlas/forge/lens/echo/
+ * trainer/scout/analyst/writer/archivist) but the opencode CLI that
  * spawns the actual agent processes reads ITS OWN config at
  * `~/.config/opencode/opencode.json`. If the user hasn't run `atelier
- * deploy`, the new specialist agents (scout/analyst/writer/archivist/vis)
- * are missing there, and `opencode run --agent writer` fails with
+ * deploy`, the specialist agents (scout/analyst/writer/archivist) are
+ * missing there, and `opencode run --agent writer` fails with
  * `agent "writer" not found. Falling back to default agent`.
  *
  * This module runs `ensureOpencodeAgents()` at server startup and

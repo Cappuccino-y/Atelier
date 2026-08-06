@@ -28,16 +28,16 @@
       }
     },
     "lens": {
-      "description": "Lens 审查只读，专注找问题、出 review",
+      "description": "Lens 审查 + 视觉验证 — 多模态，读代码找问题 + 启动程序截图看图",
       "mode": "primary",
-      "model": "custom-saas/kimi-k2.6-saas",
+      "model": "custom-saas/minimax-MiniMax-M3-cp",
       "prompt": "{file:./agents/lens.md}",
       "temperature": 0.1,
       "permission": {
         "skill": {
           "*": "deny"
         },
-        "bash": "deny",
+        "bash": "allow",
         "edit": "deny",
         "write": "deny",
         "read": {
@@ -204,33 +204,6 @@
           "*": "deny"
         },
         "bash": "deny",
-        "edit": "deny",
-        "write": "deny",
-        "read": "allow",
-        "glob": "allow",
-        "grep": "allow",
-        "list": "allow",
-        "webfetch": "allow",
-        "websearch": "allow",
-        "lsp": "allow",
-        "task": "deny",
-        "todowrite": "deny",
-        "question": "deny",
-        "external_directory": "allow",
-        "doom_loop": "allow"
-      }
-    },
-    "vis": {
-      "description": "Vis 视觉 agent — 多模态输入理解（图片/截图/视频帧）",
-      "mode": "primary",
-      "model": "custom-saas/minimax-MiniMax-M3-cp",
-      "prompt": "{file:./agents/vis.md}",
-      "temperature": 0.3,
-      "permission": {
-        "skill": {
-          "*": "deny"
-        },
-        "bash": "allow",
         "edit": "deny",
         "write": "deny",
         "read": "allow",

@@ -126,7 +126,6 @@ function seedDatabase() {
       ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y", resolveAgentModel("analyst"),   "idle",   now],
       ["writer",    "Writer",    "writer",       "#3B82F6", "W", resolveAgentModel("writer"),    "idle",   now],
       ["archivist", "Archivist", "archivist",    "#6366F1", "R", resolveAgentModel("archivist"), "idle",   now],
-      ["vis",       "Vis",       "vision",       "#EC4899", "V", resolveAgentModel("vis"),       "idle",   now],
       ["user",      "You",       "user",         "#64748B", "U", "human",                       "online", now],
     ];
     for (const agent of agents) insertAgent.run(...agent);
@@ -134,11 +133,11 @@ function seedDatabase() {
     // Rooms with full agent rosters. Each room shows the specialists
     // most relevant to its topic in the sidebar invite dropdown.
     const rooms = [
-      ["general",       "General",       "anything goes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","forge","lens","echo","scout","analyst","writer","vis","user"]), "", now],
+      ["general",       "General",       "anything goes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","forge","lens","echo","scout","analyst","writer","user"]), "", now],
       ["build-review",  "Build Review",  "code review",   "active", 0, now - 4 * 60_000, JSON.stringify(["atlas","forge","lens","user"]), "", now],
       ["research",      "Research",      "investigation", "active", 0, now - 2 * 60_000, JSON.stringify(["atlas","scout","analyst","writer","echo","user"]), "", now],
       ["kb-curation",   "KB Curation",   "memory writes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","archivist","trainer","echo","user"]), "", now],
-      ["visual-review", "Visual Review", "screenshots",   "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","vis","writer","analyst","user"]), "", now],
+      ["visual-review", "Visual Review", "screenshots",   "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","lens","writer","analyst","user"]), "", now],
     ];
     for (const room of rooms) insertRoom.run(...room);
 
@@ -278,7 +277,6 @@ const V2_AGENT_DEFAULTS: Array<[string, string, string, string, string]> = [
   ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y"],
   ["writer",    "Writer",    "writer",       "#3B82F6", "W"],
   ["archivist", "Archivist", "archivist",    "#6366F1", "R"],
-  ["vis",       "Vis",       "vision",       "#EC4899", "V"],
 ];
 
 function migrateAgentsV2(): void {
@@ -290,6 +288,9 @@ function migrateAgentsV2(): void {
   for (const [id, name, role, color, avatar] of V2_AGENT_DEFAULTS) {
     insertAgent.run(id, name, role, color, avatar, resolveAgentModel(id), now);
   }
+  // Vis merged into Lens (v2.2) — remove the legacy agent so the UI/roster
+  // no longer offers it. Historical @Vis messages keep their author_id.
+  db.prepare(`DELETE FROM agents WHERE id = 'vis'`).run();
 }
 migrateAgentsV2();
 

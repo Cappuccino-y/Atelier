@@ -75,7 +75,7 @@ export const config = {
   opencodeModel: _envOpencodeModel,
   opencodeTimeout: parseInt(process.env.OPENCODE_TIMEOUT ?? "600000", 10),
   opencodeHandoffDepth: parseInt(process.env.OPENCODE_HANDOFF_DEPTH ?? "50", 10),
-  agentMapping: parseMapping(process.env.AGENT_MAPPING ?? "atlas:atlas,forge:build,lens:lens,echo:echo,trainer:trainer,scout:scout,analyst:analyst,writer:writer,archivist:archivist,vis:vis"),
+  agentMapping: parseMapping(process.env.AGENT_MAPPING ?? "atlas:atlas,forge:build,lens:lens,echo:echo,trainer:trainer,scout:scout,analyst:analyst,writer:writer,archivist:archivist"),
   proserpinaUrl: process.env.PROSERPINA_URL ?? "http://127.0.0.1:8765",
   dbPath: process.env.DB_PATH ?? "./data/atelier.db",
   logDir: process.env.LOG_DIR ?? "../logs",
