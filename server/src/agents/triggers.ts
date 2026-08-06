@@ -15,11 +15,13 @@ import {
   evaluateImplicitRules,
   buildEchoFallback,
   type TagKind,
+  type ImplicitTarget,
 } from "./implicit-handoff.js";
+import { decideRetry, sleep } from "./retry.js";
 import { nanoid } from "nanoid";
 
-const MENTION_RE = /@(!?)([\w一-鿿]+)/g;
-const MAX_HANDOFF_DEPTH = 50;
+const MENTION_RE = /(?<![\w.@])@(!?)([\w一-鿿]+)/g;
+const MAX_HANDOFF_DEPTH = 10;
 const FLOOD_WINDOW = 10;
 const FLOOD_THRESHOLD = 5;
 const MAX_PARALLEL_AGENTS = 4;
@@ -161,7 +163,10 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   // Drop self-mentions (an agent handing off to itself is a no-op).
   targets = targets.filter((m) => m.id !== params.authorId);
 
-  const depth = currentDepth(params.roomId);
+  // Depth guard: real handoff-chain depth (walk parent pointers), not a
+  // room-message-count heuristic — parallel traffic in a room must not
+  // trip the cap.
+  const depth = chainDepth(params.parentMessageId);
   if (depth > MAX_HANDOFF_DEPTH) {
     sendAll("system.warning", { roomId: params.roomId, reason: "depth-cap", depth });
     return;
@@ -177,6 +182,24 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   // asyncio.gather / Promise.all, CrewAI's Process.parallel — all default to
   // parallel fan-out. The trade-off is N× tokens + potential rate-limit
   // storms; we cap with MAX_PARALLEL_AGENTS below.
+  //
+  // SEMANTIC CONTRACT: a multi-target `to` array is ALWAYS parallel — there
+  // is no ordering between the targets. Sequential intent must be expressed
+  // as single-target hops (A → B → C), where the receiver emits its own
+  // handoff for the next hop. Broadcast the fan-out for observability so a
+  // mistaken multi-target "sequential" handoff is visible in the logs/UI
+  // instead of silently misbehaving.
+  if (params.handoff && params.handoff.to.length > 1) {
+    sendAll("system.info", {
+      roomId: params.roomId,
+      reason: "parallel-fanout",
+      from: params.authorId,
+      targets: params.handoff.to.map((t) => t.id),
+      traceId: params.handoff.traceId,
+      note: "multi-target handoff — dispatched in parallel (no ordering)",
+      timestamp: Date.now(),
+    });
+  }
   const filtered = targets
     .filter((m) => !isAgentFlooding(params.roomId, m.id))
     .slice(0, MAX_PARALLEL_AGENTS);
@@ -192,9 +215,7 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   // Build the trailer once so all fanned-out agents see the same trace id
   // and provenance. Falls back to legacy "[handoff task — authorId]: task"
   // for v1 blocks without requiredOutputSchema.
-  const trailer = params.handoff
-    ? formatHandoffTaskTrailer(params.handoff)
-    : (params.content.includes("[handoff task") ? "" : "");  // safety: old callers passed handoffTask as content suffix
+  const trailer = params.handoff ? formatHandoffTaskTrailer(params.handoff) : "";
   const prompt = trailer ? `${params.content}\n\n${trailer}` : params.content;
 
   await Promise.allSettled(
@@ -211,12 +232,99 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   );
 }
 
-function currentDepth(roomId: string): number {
-  const row = db.prepare(`
-    SELECT COUNT(*) as c FROM messages
-    WHERE room_id = ? AND author_id != 'user' AND timestamp > ?
-  `).get(roomId, Date.now() - 60_000) as { c: number };
-  return row.c;
+/**
+ * Real handoff-chain depth: walk the parent chain from the message being
+ * routed, counting consecutive agent-authored hops. Unlike the old
+ * message-count heuristic, this is unaffected by parallel traffic in the
+ * room — two independent chains running at once can't push each other
+ * over the cap. Bounded by the visited set so malformed parent pointers
+ * can't loop forever.
+ */
+function chainDepth(parentMessageId: string | undefined): number {
+  let depth = 0;
+  let current = parentMessageId ?? null;
+  const visited = new Set<string>();
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const row = db.prepare(`
+      SELECT author_id, parent_id FROM messages WHERE id = ?
+    `).get(current) as { author_id: string; parent_id: string | null } | undefined;
+    if (!row) break;
+    if (row.author_id !== "user") depth++;
+    current = row.parent_id;
+  }
+  return depth;
+}
+
+/**
+ * Build synthetic handoff v2 directives from the implicit tag-based rules
+ * that fired for an agent's output. Targets are grouped by
+ * requiredOutputSchema so each fanned-out receiver is validated against the
+ * schema IT was asked to produce (a single shared schema would force every
+ * receiver to emit the first rule's tag). Returns [] when no rule fired or
+ * nothing resolved to a known agent.
+ */
+function buildImplicitDirectives(
+  roomId: string,
+  content: string,
+  tags: string[],
+  fromAgentId: string,
+  parentMessageId: string,
+): HandoffDirectiveV2[] {
+  const tagKinds = tags as TagKind[];
+  const implicit = evaluateImplicitRules({ from: fromAgentId.toLowerCase(), tags: tagKinds, content });
+  if (implicit.length === 0) return [];
+
+  const fakeLocator: AgentLocator = (raw: string) => {
+    const a = getAgentByName(raw);
+    return a ? { id: a.id, name: a.name } : null;
+  };
+
+  const groups = new Map<OutputSchema, ImplicitTarget[]>();
+  for (const t of implicit) {
+    const arr = groups.get(t.requiredOutputSchema) ?? [];
+    arr.push(t);
+    groups.set(t.requiredOutputSchema, arr);
+  }
+
+  const directives: HandoffDirectiveV2[] = [];
+  for (const [schema, targets] of groups) {
+    const resolved = targets
+      .map((t) => fakeLocator(t.agentId))
+      .filter((a): a is { id: string; name: string } => a !== null);
+    if (resolved.length === 0) continue;
+    const traceId = `imp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const taskSummary = targets.map((t) => `[${t.agentId}] ${t.reason}`).join("; ");
+    directives.push({
+      schemaVersion: "2.0",
+      traceId,
+      rawTraceId: traceId,
+      to: resolved.map((a) => ({ id: a.id, name: a.name, rawName: a.id })),
+      taskSummary,
+      requiredOutputSchema: schema,
+      failurePolicy: {
+        onInvalidOutput: "fallback_echo",
+        onTimeout: "fallback_echo",
+        maxRetries: 1,
+      },
+      provenance: {
+        parentAgent: fromAgentId,
+        parentMessageId,
+      },
+    });
+  }
+
+  if (directives.length > 0) {
+    // Broadcast which implicit rules fired for observability.
+    sendAll("system.info", {
+      roomId,
+      reason: "implicit-handoff",
+      from: fromAgentId,
+      targets: implicit.map((t) => `${t.agentId}:${t.requiredOutputSchema}`),
+      reasons: implicit.map((t) => t.reason),
+    });
+  }
+  return directives;
 }
 
 async function invokeAgentAsync(opts: {
@@ -310,76 +418,117 @@ async function invokeAgentAsync(opts: {
       // Routing targets come from the structured ```handoff``` block — see
       // parseHandoff. Prose @mentions are still extracted for display
       // purposes (UI shows "@Lens" pills) but never drive routing.
-      const handoff = parseHandoff(result.content, agentLocator);
-      const mentionedAgents = handoff ? handoff.to : extractMentions(result.content);
+      const emittedHandoff = parseHandoff(result.content, agentLocator);
+      const mentionedAgents = emittedHandoff ? emittedHandoff.to : extractMentions(result.content);
 
-      // Output-schema validation. If the parent agent required a specific
-      // output schema and the receiver didn't produce the expected tag,
-      // trigger failurePolicy.onInvalidOutput (default: fallback_echo).
+      // Output-schema validation. The INVOKER's requiredOutputSchema — the
+      // directive that brought THIS agent into the chain (opts.handoff) —
+      // is what this reply is validated against, NOT the schema the agent
+      // declares for its own next handoff. (The old code validated against
+      // the emitted block, so a well-behaved Forge→Lens handoff — Forge
+      // emits [RESULT] but declares review_block for Lens — was wrongly
+      // flagged as a schema mismatch and hijacked by echo.)
+      //
+      // failurePolicy decides the outcome:
+      //   fallback_echo → hand the task to echo (default)
+      //   retry         → re-invoke this agent with feedback after backoff
+      //   escalate      → warn + stop
+      // Only fallback_echo REPLACES routing. retry/escalate BLOCK the
+      // invalid output from fanning out to the agents it asked for.
+      const requiredSchema = opts.handoff?.requiredOutputSchema;
+      const failurePolicy = opts.handoff?.failurePolicy ?? {
+        onInvalidOutput: "fallback_echo" as const,
+        onTimeout: "fallback_echo" as const,
+        maxRetries: 1,
+      };
       let echoFallback: HandoffDirectiveV2 | null = null;
-      if (handoff?.requiredOutputSchema) {
-        if (!validateOutputAgainstSchema(result.content, handoff.requiredOutputSchema)) {
-          sendAll("system.warning", {
-            roomId: opts.roomId,
-            reason: "output-schema-mismatch",
-            agentId: opts.agentId,
-            expected: handoff.requiredOutputSchema,
-            traceId: handoff.traceId,
-          });
-          // failurePolicy.onInvalidOutput = fallback_echo (default) →
+      let validationFailed = false;
+      if (requiredSchema && !validateOutputAgainstSchema(result.content, requiredSchema)) {
+        validationFailed = true;
+        sendAll("system.warning", {
+          roomId: opts.roomId,
+          reason: "output-schema-mismatch",
+          agentId: opts.agentId,
+          expected: requiredSchema,
+          traceId: opts.handoff?.traceId,
+        });
+        if (failurePolicy.onInvalidOutput === "fallback_echo") {
           // hand the task to echo with full context so it can either
           // produce a degraded answer or escalate via [BLOCKER].
-          const fp = handoff.failurePolicy ?? {
-            onInvalidOutput: "fallback_echo" as const,
-            onTimeout: "fallback_echo" as const,
-            maxRetries: 1,
-          };
-          if (fp.onInvalidOutput === "fallback_echo") {
-            echoFallback = buildEchoFallback({
-              from: opts.agentId,
-              parentTraceId: handoff.traceId,
-              parentContent: result.content,
-              expectedSchema: handoff.requiredOutputSchema,
-              originalTaskSummary: handoff.taskSummary,
-            });
-          } else if (fp.onInvalidOutput === "retry" && fp.maxRetries > 0) {
-            // Retry: re-invoke the same agent with schema-mismatch feedback.
-            // We decrement maxRetries on the new directive so the chain
-            // eventually gives up.
+          echoFallback = buildEchoFallback({
+            from: opts.agentId,
+            parentTraceId: opts.handoff?.traceId ?? "unknown",
+            parentContent: result.content,
+            expectedSchema: requiredSchema,
+            originalTaskSummary: opts.handoff?.taskSummary,
+          });
+        } else if (failurePolicy.onInvalidOutput === "retry" && failurePolicy.maxRetries > 0) {
+          // Retry: re-invoke the same agent with schema-mismatch feedback,
+          // after an exponential-backoff delay. We decrement maxRetries on
+          // the new directive so the chain eventually gives up. The retry
+          // re-enters the full pipeline on completion, so the CURRENT
+          // (invalid) output must NOT route anywhere below.
+          const decision = decideRetry({
+            attempt: 0,
+            maxRetries: failurePolicy.maxRetries,
+            elapsedMs: Date.now() - startedAt,
+            reason: `schema-mismatch on "${requiredSchema}"`,
+          });
+          if (decision.shouldRetry) {
             sendAll("system.info", {
               roomId: opts.roomId,
               reason: "schema-retry",
               agentId: opts.agentId,
-              traceId: handoff.traceId,
-              remainingRetries: fp.maxRetries - 1,
+              traceId: opts.handoff?.traceId,
+              retryDelayMs: decision.delayMs,
+              remainingRetries: failurePolicy.maxRetries - 1,
             });
-            // (Retry happens by re-queuing the same agent invocation with
-            // an enriched prompt that includes the schema mismatch. We
-            // do this inline to keep state simple.)
             const retryTrailer =
-              `${handoff.taskSummary}\n\n[RETRY — your previous reply did not produce the required output tag for schema "${handoff.requiredOutputSchema}". Please re-emit with the correct [TAG] block.]`;
-            void invokeAgentAsync({
-              roomId: opts.roomId,
-              agentId: opts.agentId,
-              prompt: `${result.content}\n\n${retryTrailer}`,
-              parentMessageId: opts.parentMessageId,
-              source: "agent",
-              handoff: { ...handoff, failurePolicy: { ...handoff.failurePolicy, maxRetries: fp.maxRetries - 1 } },
-            });
+              `${opts.handoff?.taskSummary ?? ""}\n\n[RETRY — your previous reply did not produce the required output tag for schema "${requiredSchema}". Please re-emit with the correct [TAG] block.]`;
+            void (async () => {
+              await sleep(decision.delayMs);
+              return invokeAgentAsync({
+                roomId: opts.roomId,
+                agentId: opts.agentId,
+                prompt: `${result.content}\n\n${retryTrailer}`,
+                parentMessageId: opts.parentMessageId,
+                source: "agent",
+                handoff: opts.handoff
+                  ? { ...opts.handoff, failurePolicy: { ...opts.handoff.failurePolicy, maxRetries: failurePolicy.maxRetries - 1 } }
+                  : undefined,
+              });
+            })();
           } else {
-            // failurePolicy.onInvalidOutput = "escalate" → emit [BLOCKER]
-            // so the user sees that the chain gave up.
+            // Backoff budget or retries exhausted → escalate to user.
             sendAll("system.warning", {
               roomId: opts.roomId,
               reason: "schema-escalate",
               agentId: opts.agentId,
-              traceId: handoff.traceId,
+              traceId: opts.handoff?.traceId,
+              detail: decision.reason,
             });
           }
+        } else {
+          // failurePolicy.onInvalidOutput = "escalate" → emit [BLOCKER]
+          // so the user sees that the chain gave up.
+          sendAll("system.warning", {
+            roomId: opts.roomId,
+            reason: "schema-escalate",
+            agentId: opts.agentId,
+            traceId: opts.handoff?.traceId,
+          });
         }
       }
 
-      const displayContent = stripHandoff(result.content);
+      // If the agent's reply was ONLY a ```handoff``` block (no prose), the
+      // stripped display would be blank — which reads as a silent failure.
+      // Fall back to a human-readable dispatch summary so the UI shows
+      // something meaningful (and the user can see the task went where).
+      let displayContent = stripHandoff(result.content);
+      if (!displayContent && emittedHandoff) {
+        const names = emittedHandoff.to.map((t) => t.name).join(", ");
+        displayContent = `[派发 → ${names}]${emittedHandoff.taskSummary ? ` ${emittedHandoff.taskSummary}` : ""}`;
+      }
       db.prepare(`
         INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, parent_id, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -428,79 +577,38 @@ async function invokeAgentAsync(opts: {
       });
 
       // Resolve the next set of targets:
-      //   1. If schema validation failed and echoFallback was set, that wins.
-      //   2. Else if agent emitted an explicit ```handoff``` block, use it.
-      //   3. Else evaluate implicit tag-based rules (Phase 2).
-      //
-      // The three sources are merged + deduped so an explicit handoff
-      // block isn't accidentally shadowed by an implicit rule.
-      let nextHandoff: HandoffDirectiveV2 | null = null;
+      //   1. Schema validation failed + fallback_echo → echo directive wins.
+      //   2. Else if validation passed and the agent emitted an explicit
+      //      ```handoff``` block, use it.
+      //   3. Else (validation passed, no handoff block) evaluate implicit
+      //      tag-based rules (Phase 2), grouped per requiredOutputSchema so
+      //      each fanned-out receiver is validated against ITS schema.
+      //   4. On validation failure with retry/escalate, NOTHING routes — the
+      //      invalid output is terminal for this hop (retry handles it).
+      const nextDirectives: HandoffDirectiveV2[] = [];
       if (echoFallback) {
-        nextHandoff = echoFallback;
-      } else if (handoff) {
-        nextHandoff = handoff;
-      } else {
-        // Implicit rules: data-driven routing based on tag patterns.
-        const tagKinds = tags as TagKind[];
-        const implicit = evaluateImplicitRules({
-          from: opts.agentId.toLowerCase(),
-          tags: tagKinds,
-          content: result.content,
-        });
-        if (implicit.length > 0) {
-          // Build a synthetic handoff v2 directive so the rest of the
-          // pipeline (trailer format, depth check, fan-out) works uniformly.
-          const fakeLocator: AgentLocator = (raw: string) => {
-            const a = getAgentByName(raw);
-            return a ? { id: a.id, name: a.name } : null;
-          };
-          const resolved = implicit
-            .map((t) => fakeLocator(t.agentId))
-            .filter((a): a is { id: string; name: string } => a !== null);
-          if (resolved.length > 0) {
-            const traceId = `imp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-            const taskSummary = implicit.map((t) => `[${t.agentId}] ${t.reason}`).join("; ");
-            const required = implicit[0].requiredOutputSchema;
-            nextHandoff = {
-              schemaVersion: "2.0",
-              traceId,
-              rawTraceId: traceId,
-              to: resolved.map((a) => ({ id: a.id, name: a.name, rawName: a.id })),
-              taskSummary,
-              requiredOutputSchema: required,
-              failurePolicy: {
-                onInvalidOutput: "fallback_echo",
-                onTimeout: "fallback_echo",
-                maxRetries: 1,
-              },
-              provenance: {
-                parentAgent: opts.agentId,
-                parentMessageId: id,
-              },
-            };
-            // Broadcast which implicit rules fired for observability.
-            sendAll("system.info", {
-              roomId: opts.roomId,
-              reason: "implicit-handoff",
-              from: opts.agentId,
-              targets: implicit.map((t) => `${t.agentId}:${t.requiredOutputSchema}`),
-              reasons: implicit.map((t) => t.reason),
-            });
-          }
+        nextDirectives.push(echoFallback);
+      } else if (!validationFailed) {
+        if (emittedHandoff) {
+          nextDirectives.push(emittedHandoff);
+        } else {
+          nextDirectives.push(...buildImplicitDirectives(opts.roomId, result.content, tags, opts.agentId, id));
         }
       }
 
       // Forward ONLY on explicit structured handoff in the agent's reply
-      // (or implicit-rule-derived fallback). Prose @mentions no longer drive
-      // routing (see triggerOnMessage).
-      await triggerOnMessage({
-        roomId: opts.roomId,
-        authorId: opts.agentId,
-        content: result.content,
-        parentMessageId: id,
-        source: opts.source ?? "agent",
-        handoff: nextHandoff ?? undefined,
-      });
+      // (or implicit-rule-derived fallback / echo takeover). Prose @mentions
+      // no longer drive routing (see triggerOnMessage).
+      for (const d of nextDirectives) {
+        await triggerOnMessage({
+          roomId: opts.roomId,
+          authorId: opts.agentId,
+          content: result.content,
+          parentMessageId: id,
+          source: opts.source ?? "agent",
+          handoff: d,
+        });
+      }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       sendAll("agent.error", {

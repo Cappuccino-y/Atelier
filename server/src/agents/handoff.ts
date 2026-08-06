@@ -77,7 +77,19 @@ export const FailureActionEnum = z.enum(["fallback_echo", "retry", "escalate"]);
  */
 export const HandoffPayloadV2_1Schema = z.object({
   schemaVersion: z.union([z.literal("2.0"), z.literal("2.1")]),
-  traceId: z.string().min(1),
+  // traceId is OPTIONAL on the wire — the server generates one when absent
+  // (SHARED_RULES: "traceId 由 server 自动生成"). Required here would
+  // reject every well-behaved handoff that follows the prompt examples,
+  // which omit it.
+  traceId: z.string().min(1).optional(),
+  // `to` semantic contract:
+  //   - 1 target   → single-hop handoff (sequential — the receiver decides
+  //                  the next hop by emitting its own handoff).
+  //   - 2+ targets → PARALLEL fan-out. There is NO ordering between them;
+  //                  the server dispatches all simultaneously and each
+  //                  receiver concludes independently. Sequential intent
+  //                  must NEVER be encoded as a multi-target `to` array —
+  //                  express it as single-target hops (A → B → C).
   to: z.array(z.string().min(1)).min(1),
   taskSummary: z.string().min(1).max(2000),
   provenance: z.object({
@@ -185,6 +197,14 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
     return resolveV2(parsed.data, locator);
   }
 
+  // Unknown schemaVersion (e.g. a future v3 block) — reject rather than
+  // misparse as v1, which would silently truncate the payload to {to, task}
+  // and misroute the task. Only blocks with NO schemaVersion field are
+  // treated as legacy v1.
+  if (typeof obj.schemaVersion === "string") {
+    return null;
+  }
+
   // v1 fallback.
   const v1 = HandoffPayloadV1Shape.safeParse(obj);
   if (!v1.success) return null;
@@ -214,7 +234,7 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
   return {
     schemaVersion: "2.0",
     traceId: nanoid(),
-    rawTraceId: "(legacy-v1)",
+    rawTraceId: "",   // v1 blocks carry no traceId — nothing to preserve
     to: resolved,
     taskSummary: v1.data.task ?? "",
     failurePolicy: { onInvalidOutput: "fallback_echo", onTimeout: "fallback_echo", maxRetries: 1 },
@@ -236,7 +256,7 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
   return {
     schemaVersion: payload.schemaVersion,
     traceId: payload.traceId ?? nanoid(),
-    rawTraceId: payload.traceId,
+    rawTraceId: payload.traceId ?? "",
     to: resolved,
     taskSummary: payload.taskSummary,
     provenance: payload.provenance,

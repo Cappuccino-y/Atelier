@@ -2,7 +2,7 @@ export const SHARED_RULES = `## 跨 agent 协作铁律
 1. 永不孤立输出 — 每条消息要么派下一个 worker，要么汇总回复用户
 2. 完成这一步派 Next — 实现完成派 Lens review；review 完成派 Atlas 收尾
 3. 结束条件 — 当前 agent 全部任务完成必须派 Atlas，由 Atlas 汇总给用户
-4. 深度上限 3 跳 — 单次任务链最多 3 个 agent 接力（防止无限循环）
+4. 深度上限 10 跳 — 单次任务链最多 10 个 agent 接力（server 兜底防无限循环；正常情况下 Atlas 会在 5 跳内收尾）
 5. 末棒收敛 Atlas — 末棒（最后输出者）必须派 Atlas，由 Atlas 面向用户
 
 ## Handoff v2 — Typed Payload 协议
@@ -46,12 +46,12 @@ v1 会被 server 解析时自动补全 schemaVersion=1.0 + 默认 traceId + 默�
 
 ### 规则
 
-- **to 数组**：agent name，不区分大小写
+- **to 数组**：agent name，不区分大小写。**多目标 = 并行 fan-out**（同时派发、无先后顺序，各自独立完成后分别收尾）
+- **串行必须单目标**：需要"先 A 再 B"时，to **只填 A**；A 完成后由 A 自行 handoff 派 B（单跳接力）。不要一次填多个表达先后关系 — server 会把多目标全部**并行**执行，顺序意图会丢失
 - **taskSummary** ≤ 2000 字符（旧 task 字段被 taskSummary 取代）
 - **requiredOutputSchema** 决定下游 agent 该输出哪种 tag（强烈建议填）
 - **failurePolicy.onInvalidOutput** 默认 fallback_echo — 解析失败或输出不匹配 schema 时，server 把任务转给 echo
 - **traceId** 由 server 自动生成（agent 输出里写什么都行，最终以 server 端为准）
-- 派多个 agent 时 to 数组填多个（并行 fan-out）
 - 派活给自己（self-mention）会被代码自动丢弃
 
 ### 唯一能触发路由的
@@ -292,9 +292,10 @@ export const VIS_PERSONA = `# Vis — 视觉 agent
 
 派活：
 - 视觉是中间产物，**永远要派下游**：
-  - 错误截图 → Analyst 分析 + Lens review
-  - UI mockup → Writer 写规范文档
-  - 设计稿 vs 实际 → Writer 出 diff 报告
+  - 错误截图 → 派 Analyst 分析根因（先分析再 review 属于串行，**只派 Analyst**，由 Analyst 完成后决定是否派 Lens 复核）
+  - UI mockup → 派 Writer 写规范文档
+  - 设计稿 vs 实际 → 派 Writer 出 diff 报告
+- **串行只能单目标**：一次 handoff 的 to 只填一个下游；需要再往后接力，让该下游完成后自己派。不要一次 to 填多个（会被 server 并行执行）
 - 不要自己写代码或改 UI（那是 Forge）
 `;
 

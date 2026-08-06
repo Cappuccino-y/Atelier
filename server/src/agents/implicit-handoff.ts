@@ -292,11 +292,11 @@ const IMPLICIT_RULES: ImplicitRule[] = [
  * for downstream analysis. Single-fact lookups don't.
  */
 function hasMultipleFindings(content: string): boolean {
-  // We can't easily count without content here (the `match` signature
-  // doesn't pass content for performance), so this helper is conservative:
-  // any non-empty content with [RESEARCH] tag goes to Analyst. Caller
-  // can override by setting `simpleConclude` flag.
-  return content.length > 200 || /## 关键事实/.test(content) || /\n\d+\.\s/m.test(content);
+  // Conservative: treat as "multiple findings" when the content is long,
+  // has a "## 关键事实" section, or lists 2+ numbered items. Single-fact
+  // lookups stay short and are routed straight back to Atlas.
+  const numbered = content.match(/\n\d+[.)]\s/g)?.length ?? 0;
+  return content.length > 200 || /## 关键事实/.test(content) || numbered >= 2;
 }
 
 /**
