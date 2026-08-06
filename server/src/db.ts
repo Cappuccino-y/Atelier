@@ -113,19 +113,32 @@ function seedDatabase() {
   `);
 
   const seed = db.transaction(() => {
-    const agents = [
-      ["atlas", "Atlas", "orchestrator", "#8B5CF6", "A", config.opencodeModel, "online", now],
-      ["forge", "Forge", "implementer", "#F97316", "F", config.opencodeModel, "idle", now],
-      ["lens", "Lens", "reviewer", "#06B6D4", "L", config.opencodeModel, "idle", now],
-      ["echo", "Echo", "support", "#22C55E", "E", config.opencodeModel, "idle", now],
-      ["user", "You", "user", "#64748B", "U", "human", "online", now],
+    // v2 roster: 10 agents (5 existing + 5 new specialists) + user.
+    // model field is the opencode model key; resolveAgentModel() will
+    // override this at runtime with per-agent config from agent-models.json.
+    const agents: Array<[string, string, string, string, string, string, string, number]> = [
+      ["atlas",     "Atlas",     "orchestrator", "#8B5CF6", "A", config.opencodeModel, "online", now],
+      ["forge",     "Forge",     "implementer",  "#F97316", "F", config.opencodeModel, "idle",   now],
+      ["lens",      "Lens",      "reviewer",     "#06B6D4", "L", config.opencodeModel, "idle",   now],
+      ["echo",      "Echo",      "support",      "#22C55E", "E", config.opencodeModel, "idle",   now],
+      ["trainer",   "Trainer",   "kb-curator",   "#A855F7", "T", config.opencodeModel, "idle",   now],
+      ["scout",     "Scout",     "researcher",   "#10B981", "S", config.opencodeModel, "idle",   now],
+      ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y", config.opencodeModel, "idle",   now],
+      ["writer",    "Writer",    "writer",       "#3B82F6", "W", config.opencodeModel, "idle",   now],
+      ["archivist", "Archivist", "archivist",    "#6366F1", "R", config.opencodeModel, "idle",   now],
+      ["vis",       "Vis",       "vision",       "#EC4899", "V", config.opencodeModel, "idle",   now],
+      ["user",      "You",       "user",         "#64748B", "U", "human",              "online", now],
     ];
     for (const agent of agents) insertAgent.run(...agent);
 
+    // Rooms with full agent rosters. Each room shows the specialists
+    // most relevant to its topic in the sidebar invite dropdown.
     const rooms = [
-      ["general", "General", "anything goes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas", "forge", "lens", "echo", "user"]), "", now],
-      ["build-review", "Build Review", "code review", "active", 0, now - 4 * 60_000, JSON.stringify(["atlas", "forge", "lens", "user"]), "", now],
-      ["research", "Research", "investigation", "active", 0, now - 2 * 60_000, JSON.stringify(["atlas", "echo", "user"]), "", now],
+      ["general",       "General",       "anything goes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","forge","lens","echo","scout","analyst","writer","vis","user"]), "", now],
+      ["build-review",  "Build Review",  "code review",   "active", 0, now - 4 * 60_000, JSON.stringify(["atlas","forge","lens","user"]), "", now],
+      ["research",      "Research",      "investigation", "active", 0, now - 2 * 60_000, JSON.stringify(["atlas","scout","analyst","writer","echo","user"]), "", now],
+      ["kb-curation",   "KB Curation",   "memory writes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","archivist","trainer","echo","user"]), "", now],
+      ["visual-review", "Visual Review", "screenshots",   "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","vis","writer","analyst","user"]), "", now],
     ];
     for (const room of rooms) insertRoom.run(...room);
 
@@ -245,3 +258,55 @@ function seedDatabase() {
 
 const roomCount = db.prepare("SELECT COUNT(*) AS count FROM rooms").get() as CountRow;
 if (roomCount.count === 0) seedDatabase();
+
+/**
+ * Migration: ensure all v2 agents exist in the agents table, even on
+ * databases that were seeded with the v1 (4-agent) roster. Runs on
+ * every server start; uses INSERT OR IGNORE so it's idempotent.
+ *
+ * Each entry: [id, name, role, color, avatar, defaultModel].
+ * The model is the opencode model key; resolveAgentModel() at
+ * runtime overrides it with per-agent overrides from agent-models.json.
+ */
+const V2_AGENT_DEFAULTS: Array<[string, string, string, string, string, string]> = [
+  ["atlas",     "Atlas",     "orchestrator", "#8B5CF6", "A", "custom-saas/minimax-MiniMax-M3-cp"],
+  ["forge",     "Forge",     "implementer",  "#F97316", "F", "custom-saas/minimax-MiniMax-M3-cp"],
+  ["lens",      "Lens",      "reviewer",     "#06B6D4", "L", "custom-saas/minimax-MiniMax-M3-cp"],
+  ["echo",      "Echo",      "support",      "#22C55E", "E", "comagic/qwen3.6-flash-saas"],
+  ["trainer",   "Trainer",   "kb-curator",   "#A855F7", "T", "custom-saas/minimax-MiniMax-M3-cp"],
+  ["scout",     "Scout",     "researcher",   "#10B981", "S", "comagic/qwen3.6-flash-saas"],
+  ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y", "custom-saas/qwen-3.6-saas"],
+  ["writer",    "Writer",    "writer",       "#3B82F6", "W", "custom-saas/qwen-3.6-saas"],
+  ["archivist", "Archivist", "archivist",    "#6366F1", "R", "custom-saas/minimax-MiniMax-M3-cp"],
+  ["vis",       "Vis",       "vision",       "#EC4899", "V", "custom-saas/minimax-MiniMax-M3-cp"],
+];
+
+function migrateAgentsV2(): void {
+  const now = Date.now();
+  const insertAgent = db.prepare(`
+    INSERT OR IGNORE INTO agents (id, name, role, color, avatar, model, status, last_seen)
+    VALUES (?, ?, ?, ?, ?, ?, 'idle', ?)
+  `);
+  for (const [id, name, role, color, avatar, model] of V2_AGENT_DEFAULTS) {
+    insertAgent.run(id, name, role, color, avatar, model, now);
+  }
+}
+migrateAgentsV2();
+
+/**
+ * Migration: ensure new rooms exist (kb-curation, visual-review).
+ * Existing rooms are not touched (user may have customized them).
+ */
+function migrateRoomsV2(): void {
+  const now = Date.now();
+  const insertRoom = db.prepare(`
+    INSERT OR IGNORE INTO rooms (id, name, topic, status, unread, last_activity, agent_ids, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const newRooms: Array<[string, string, string, string, number, number, string, string, number]> = [
+    ["kb-curation",   "KB Curation",   "memory writes", "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","archivist","trainer","echo","user"]), "", now],
+    ["visual-review", "Visual Review", "screenshots",   "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","vis","writer","analyst","user"]), "", now],
+  ];
+  for (const r of newRooms) insertRoom.run(...r);
+}
+migrateRoomsV2();
