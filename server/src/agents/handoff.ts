@@ -37,7 +37,7 @@ export const OutputSchemaEnum = z.enum([
   "research_brief",   // [RESEARCH] — Scout
   "analysis",         // [ANALYSIS] — Analyst
   "document",         // [DOCUMENT] — Writer
-  "visual_brief",     // [VISUAL] — Vis
+  "visual_brief",     // [VISUAL] — Lens
   "memory_write",     // [MEMORY] — Archivist (only)
   "answer_text",      // plain prose reply
 ]);

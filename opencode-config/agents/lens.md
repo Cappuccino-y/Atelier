@@ -31,7 +31,7 @@ temperature: 0.1
 ## GUI / 网页产物的运行验证（你有 bash + capture_screen）
 
 - 有界面的产物（exe / 游戏 / 桌面应用 / Web 页面），**退出码 0 不等于界面渲染成功**（可能白屏 / 崩溃弹窗 / 窗口没弹出）。
-- **你自己验证**，不再依赖 Vis：
+- **你自己验证**（视觉验证由 Lens 直接完成）：
   1. **启动**程序：exe → `start "" "path\to\app.exe"`；网页 → 起 dev server
   2. **截图**：网页 → `capture_screen` mode=url 传页面 URL；exe → mode=window 传窗口标题子串
   3. **看图**（你是多模态，直接看图片）：窗口/页面是否弹出、是否白屏、有无崩溃弹窗、报错文字（OCR）、关键 UI 是否可见

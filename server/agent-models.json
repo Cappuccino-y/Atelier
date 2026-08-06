@@ -1,46 +1,39 @@
 {
   "$schema": "./agent-models.schema.json",
-  "_comment": "Per-agent model configuration (all via custom-saas gateway). Edit freely; changes take effect on next server start (or use PUT /api/runtime/agent-models for hot reload). Verified reachable via GET /models + /messages ping on 2026-08-06.",
-  "default": "custom-saas/minimax-MiniMax-M3-cp",
+  "_comment": "Per-agent model configuration (local providers deepseekmanual + minimax2). Edit freely; changes take effect on next server start (or use PUT /api/runtime/agent-models for hot reload).",
+  "default": "minimax2/MiniMax-M3",
   "models": {
-    "atlas": "custom-saas/qwen3.7-plus",
-    "forge": "custom-saas/deepseek-deepseek-v4-flash-cp",
-    "lens": "custom-saas/minimax-MiniMax-M3-cp",
-    "echo": "custom-saas/qwen3.6-flash-saas",
-    "trainer": "custom-saas/minimax-MiniMax-M2.7-cp",
-    "scout": "custom-saas/qwen3.7-plus",
-    "analyst": "custom-saas/kimi-k3-saas",
-    "writer": "custom-saas/minimax-m3-saas",
-    "archivist": "custom-saas/minimax-MiniMax-M3-cp"
+    "atlas": "deepseekmanual/deepseek-v4-flash",
+    "forge": "deepseekmanual/deepseek-v4-flash",
+    "lens": "minimax2/MiniMax-M3",
+    "echo": "deepseekmanual/deepseek-v4-flash",
+    "trainer": "minimax2/MiniMax-M3",
+    "scout": "deepseekmanual/deepseek-v4-flash",
+    "analyst": "minimax2/MiniMax-M3",
+    "writer": "minimax2/MiniMax-M3",
+    "archivist": "minimax2/MiniMax-M3"
   },
   "presets": {
     "_comment": "Named aliases for experimentation. Reference with 'preset:<name>'.",
-    "fast": "custom-saas/minimax-MiniMax-M2.5-highspeed-cp",
-    "balanced": "custom-saas/qwen3.7-plus",
-    "deep": "custom-saas/minimax-MiniMax-M3-cp",
-    "vision": "custom-saas/minimax-MiniMax-M3-cp",
-    "coding": "custom-saas/deepseek-deepseek-v4-pro-cp"
+    "fast": "deepseekmanual/deepseek-v4-flash",
+    "balanced": "minimax2/MiniMax-M3",
+    "deep": "minimax2/MiniMax-M3",
+    "vision": "minimax2/MiniMax-M3",
+    "coding": "minimax2/MiniMax-M3"
   },
   "notes": {
-    "_comment": "All models below live on the custom-saas gateway (cm.beta.hihonor.com/llm-gateway-v3). Declared in opencode.json provider.custom-saas.models.",
-    "custom-saas/minimax-MiniMax-M3-cp": "MiniMax M3 — multimodal (image/video), strong reasoning. Lens (code review + visual verification) + Archivist.",
-    "custom-saas/minimax-MiniMax-M2.7-highspeed-cp": "M2.7 highspeed — fast, general utility (unused by roster; kept as a fast preset candidate).",
-    "custom-saas/minimax-MiniMax-M2.7-cp": "M2.7 — balanced reasoning for Trainer.",
-    "custom-saas/deepseek-deepseek-v4-pro-cp": "DeepSeek V4 Pro — strongest code generation, Forge.",
-    "custom-saas/kimi-k2.6-saas": "Kimi K2.6 — long-context (retired from Lens roster after visual merge; kept for reference).",
-    "custom-saas/kimi-k3-saas": "Kimi K3 — strong reasoning for analysis (Analyst).",
-    "custom-saas/qwen3.7-plus": "Qwen 3.7 plus — fastest model on gateway (736ms) AND plus-tier reasoning. Atlas (orchestrator) + Scout: routing/dispatch quality matters more than raw speed.",
-    "custom-saas/qwen3.6-flash-saas": "Qwen 3.6 flash — fast/cheap fallback (Echo).",
-    "custom-saas/minimax-m3-saas": "MiniMax M3 (saas id) — fast M3 quality for prose (Writer).",
+    "_comment": "Models resolve against the local ~/.config/opencode/opencode.json providers: deepseekmanual (api.deepseek.com) + minimax2 (api.minimaxi.com/anthropic).",
+    "deepseekmanual/deepseek-v4-flash": "DeepSeek V4 Flash — fast/cheap; Atlas (routing), Echo (fallback), Scout (research).",
+    "minimax2/MiniMax-M3": "MiniMax M3 — multimodal (image/video), strong reasoning; Forge (code), Lens (review + visual), Trainer, Analyst, Writer, Archivist.",
     "selection_tips": [
-      "Atlas (orchestrator): fast routing is enough — M2.7-highspeed.",
-      "Forge (implementer): needs strong code gen — deepseek-v4-pro-cp.",
-      "Lens (reviewer + visual): multimodal M3 — code review AND screenshot verification in one (Vis merged into Lens).",
-      "Echo (support + fallback): fast/cheap — qwen3.6-flash-saas.",
-      "Scout (research): reads many sources fast — qwen3.7-plus.",
-      "Analyst (analysis): strong reasoning — kimi-k3-saas.",
-      "Writer (prose): style-aware M3 quality — minimax-m3-saas.",
-      "Archivist (KB): deep extraction — minimax-M3-cp."
+      "Atlas (orchestrator): fast routing is enough — deepseek-v4-flash.",
+      "Forge (implementer): needs strong code gen — MiniMax-M3.",
+      "Lens (reviewer + visual): multimodal M3 — code review AND screenshot verification.",
+      "Echo (support + fallback): fast/cheap — deepseek-v4-flash.",
+      "Scout (research): reads many sources fast — deepseek-v4-flash.",
+      "Analyst (analysis): strong reasoning — MiniMax-M3.",
+      "Writer (prose): style-aware M3 quality — MiniMax-M3.",
+      "Archivist (KB): deep extraction — MiniMax-M3."
     ]
   }
 }

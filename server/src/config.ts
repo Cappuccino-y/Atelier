@@ -25,7 +25,7 @@ export type AgentModelsConfig = {
 };
 
 const DEFAULT_AGENT_MODELS: AgentModelsConfig = {
-  default: "custom-saas/minimax-MiniMax-M3-cp",
+  default: "minimax2/MiniMax-M3",
   models: {},
   presets: {},
 };

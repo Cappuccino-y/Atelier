@@ -237,7 +237,7 @@ curl -X PUT http://127.0.0.1:8787/api/runtime/agent-models \
 | Analyst | 分析 | qwen-3.6-saas / balanced | 推理仔细但不是顶配 |
 | Writer | 撰写 | qwen-3.6-saas / balanced | 文风感知 |
 | Archivist | KB | MiniMax-M3 / preset:deep | 提炼 evergreen pattern |
-| Vis | 视觉 | MiniMax-M3（**必须多模态**）| 图像 / 视频帧输入 |
+| Lens | 视觉 + 审查 | MiniMax-M3（**必须多模态**）| 图像 / 视频帧输入 + 截图验证 |
 
 ---
 
@@ -249,14 +249,13 @@ v2 roster 在 `~/.config/opencode/agents/` 里，按能力域拆开：
 |---|---|---|---|
 | 🧭 **Atlas** | 编排（纯路由，绝不动手） | `@Atlas` | `minimax-MiniMax-M3-cp` |
 | 🔨 **Forge** | 实现（写代码 / 改配置 / 跑命令） | `@Forge` | `minimax-MiniMax-M3-cp` |
-| 🔍 **Lens**  | 评审（只读，找问题出 `[REVIEW]`） | `@Lens` 或 `[RESULT]` 后自动 | `minimax-MiniMax-M3-cp` |
+| 🔍 **Lens**  | 评审（只读，找问题出 `[REVIEW]`）+ **视觉验证**（截图看图） | `@Lens` 或 `[RESULT]` 后自动 | `minimax-MiniMax-M3-cp` |
 | 💬 **Echo**  | 支援 + **失败兜底** chain 第一站 | `@Echo` | `preset:fast`（Qwen-Flash） |
 | 📒 **Trainer** | 经验固化 / rules / template | `@Trainer` | `minimax-MiniMax-M3-cp` |
 | 🔎 **Scout** | 调研（多源交叉验证 → `[RESEARCH]`） | `@Scout` | `preset:fast` |
 | 📊 **Analyst** | 分析 / 对比 / 推断（带置信度 → `[ANALYSIS]`） | `@Analyst` | `qwen-3.6-saas` |
 | ✍️ **Writer** | 撰写报告 / 邮件 / 文档（→ `[DOCUMENT]`） | `@Writer` | `qwen-3.6-saas` |
 | 🗄️ **Archivist** | **唯一**允许写 `[MEMORY]` 的 agent | `@Archivist` | `minimax-MiniMax-M3-cp` |
-| 👁️ **Vis** | 视觉理解（图片 / 截图 / 视频帧 → `[VISUAL]`） | `@Vis` | `minimax-MiniMax-M3-cp` |
 
 ### 推进对话的两种方式
 

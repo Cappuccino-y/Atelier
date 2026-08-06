@@ -4,7 +4,7 @@
     "atlas": {
       "description": "Atlas 编排者 — 纯路由，只分解任务并 @mention worker；绝不动手",
       "mode": "primary",
-      "model": "custom-saas/qwen3.7-plus",
+      "model": "deepseekmanual/deepseek-v4-flash",
       "prompt": "{file:./agents/atlas.md}",
       "temperature": 0.2,
       "permission": {
@@ -30,7 +30,7 @@
     "lens": {
       "description": "Lens 审查 + 视觉验证 — 多模态，读代码找问题 + 启动程序截图看图",
       "mode": "primary",
-      "model": "custom-saas/minimax-MiniMax-M3-cp",
+      "model": "minimax2/MiniMax-M3",
       "prompt": "{file:./agents/lens.md}",
       "temperature": 0.1,
       "permission": {
@@ -61,7 +61,7 @@
     "echo": {
       "description": "Echo 通用支持 + 失败兜底 — 只读",
       "mode": "primary",
-      "model": "custom-saas/qwen3.6-flash-saas",
+      "model": "deepseekmanual/deepseek-v4-flash",
       "prompt": "{file:./agents/echo.md}",
       "temperature": 0.3,
       "permission": {
@@ -88,7 +88,7 @@
     "trainer": {
       "description": "Trainer 经验固化者 — 只读",
       "mode": "primary",
-      "model": "custom-saas/minimax-MiniMax-M2.7-cp",
+      "model": "minimax2/MiniMax-M3",
       "prompt": "{file:./agents/trainer.md}",
       "temperature": 0.1,
       "permission": {
@@ -115,7 +115,7 @@
     "scout": {
       "description": "Scout 调研员 — 多源交叉验证，给 Atlas/Forge 一份可执行摘要",
       "mode": "primary",
-      "model": "custom-saas/qwen3.7-plus",
+      "model": "deepseekmanual/deepseek-v4-flash",
       "prompt": "{file:./agents/scout.md}",
       "temperature": 0.2,
       "permission": {
@@ -142,7 +142,7 @@
     "analyst": {
       "description": "Analyst 分析师 — 数据 crunching、统计推断、对比判断",
       "mode": "primary",
-      "model": "custom-saas/kimi-k3-saas",
+      "model": "minimax2/MiniMax-M3",
       "prompt": "{file:./agents/analyst.md}",
       "temperature": 0.1,
       "permission": {
@@ -169,7 +169,7 @@
     "writer": {
       "description": "Writer 写作者 — 把事实/分析润色成可发布文档",
       "mode": "primary",
-      "model": "custom-saas/minimax-m3-saas",
+      "model": "minimax2/MiniMax-M3",
       "prompt": "{file:./agents/writer.md}",
       "temperature": 0.5,
       "permission": {
@@ -196,7 +196,7 @@
     "archivist": {
       "description": "Archivist 档案员 — 唯一允许写 [MEMORY] 的 agent",
       "mode": "primary",
-      "model": "custom-saas/minimax-MiniMax-M3-cp",
+      "model": "minimax2/MiniMax-M3",
       "prompt": "{file:./agents/archivist.md}",
       "temperature": 0.1,
       "permission": {
