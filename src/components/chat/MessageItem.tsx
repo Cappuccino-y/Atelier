@@ -222,7 +222,9 @@ function QuestionCard({
         </span>
       </div>
       <div className="p-3 space-y-2">
-        <p className="text-[13px] text-zinc-800 leading-relaxed">{body}</p>
+        <div className="prose-chat text-[13px] text-zinc-800 leading-relaxed">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+        </div>
         <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-zinc-200 rounded-md focus-within:border-cyan-400 focus-within:ring-2 focus-within:ring-cyan-100">
           <input
             type="text"
@@ -259,7 +261,9 @@ function DecisionCard({
         </span>
       </div>
       <div className="p-3 space-y-1">
-        <p className="text-[13px] text-zinc-800 leading-relaxed">{body}</p>
+        <div className="prose-chat text-[13px] text-zinc-800 leading-relaxed">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+        </div>
         <p className="text-[10.5px] text-zinc-500">
           Recorded at {formatTime(timestamp)}
         </p>
@@ -291,7 +295,9 @@ function BlockerCard({
         <span className="text-[12px] font-semibold text-red-900">Blocker</span>
       </div>
       <div className="p-3 space-y-1.5">
-        <p className="text-[13px] text-zinc-800 leading-relaxed">{body}</p>
+        <div className="prose-chat text-[13px] text-zinc-800 leading-relaxed">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+        </div>
         <p className="text-[10.5px] text-zinc-500 flex items-center gap-1">
           <span>Owner:</span>
           {ownerName ? (
@@ -352,14 +358,14 @@ function TodoCard({ content }: { content: string }) {
           >
             {checked && <CheckCircle2 className="h-3 w-3" />}
           </button>
-          <span
+          <div
             className={cn(
-              "text-[13px] text-zinc-800 leading-relaxed",
-              checked && "line-through text-zinc-500"
+              "prose-chat text-[13px] text-zinc-800 leading-relaxed",
+              checked && "[&_p]:line-through [&_p]:text-zinc-500"
             )}
           >
-            {body}
-          </span>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+          </div>
         </label>
       </div>
     </div>
@@ -376,17 +382,21 @@ function TimelineRow({
   content: string;
 }) {
   return (
-    <div className="flex items-baseline gap-2 my-1 text-[13.5px] leading-relaxed">
-      <span
-        className="h-2 w-2 rounded-full shrink-0 self-center"
-        style={{ background: authorColor }}
-      />
-      <span className="text-[11px] uppercase tracking-wider font-semibold text-zinc-500 shrink-0">
-        {authorName} · status
-      </span>
-      <span className="text-zinc-700 min-w-0 flex-1">
-        {stripTag(content, "STATUS")}
-      </span>
+    <div className="my-1.5 w-full">
+      <div className="flex items-center gap-2">
+        <span
+          className="h-2 w-2 rounded-full shrink-0"
+          style={{ background: authorColor }}
+        />
+        <span className="text-[11px] uppercase tracking-wider font-semibold text-zinc-500">
+          {authorName} · status
+        </span>
+      </div>
+      <div className="mt-0.5 prose-chat text-[13.5px] leading-relaxed text-zinc-700">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {stripTag(content, "STATUS")}
+        </ReactMarkdown>
+      </div>
     </div>
   );
 }
