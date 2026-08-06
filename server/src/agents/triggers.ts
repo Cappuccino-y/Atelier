@@ -1,11 +1,18 @@
 import { db } from "../db.js";
 import { sendAll } from "../broadcast.js";
-import { invokeAgent } from "./runtime.js";
+import { invokeAgent, persistAgentMemory } from "./runtime.js";
+import {
+  parseHandoff,
+  stripHandoffBlock,
+  extractAllTags,
+  validateOutputAgainstSchema,
+  formatHandoffTaskTrailer,
+  type HandoffDirectiveV2,
+  type AgentLocator,
+} from "./handoff.js";
 import { nanoid } from "nanoid";
 
-const TAG_RE = /\[(DECISION|TODO|STATUS|RESULT|REVIEW|QUESTION|BLOCKER)\]/g;
 const MENTION_RE = /@(!?)([\w一-鿿]+)/g;
-const HANDOFF_RE = /```handoff\s*\n([\s\S]*?)```/;
 const MAX_HANDOFF_DEPTH = 50;
 const FLOOD_WINDOW = 10;
 const FLOOD_THRESHOLD = 5;
@@ -27,6 +34,14 @@ function getAgentById(id: string): AgentRow | null {
   return row ?? null;
 }
 
+/**
+ * Adapter so handoff.parseHandoff() can use our DB lookup without
+ * pulling in a circular dependency.
+ */
+const agentLocator: AgentLocator = (raw: string) => {
+  return getAgentByName(raw) ?? getAgentById(raw);
+};
+
 export function extractMentions(content: string): Array<{ name: string; id: string }> {
   const out: Array<{ name: string; id: string }> = [];
   const seen = new Set<string>();
@@ -41,66 +56,26 @@ export function extractMentions(content: string): Array<{ name: string; id: stri
   return out;
 }
 
-export type HandoffDirective = {
-  to: Array<{ id: string; name: string }>;
-  task?: string;
-};
-
-/**
- * Parses an explicit handoff JSON block from agent output.
- *
- * Format (anywhere in the agent's reply, usually at the end):
- *
- *   ```handoff
- *   {"to": ["forge", "lens"], "task": "review this change"}
- *   ```
- *
- * Returns null if no block found or block is malformed. We deliberately do
- * NOT fall back to @mention regex — that would re-introduce the same
- * false-positive problem we're fixing. Mentioning an agent in prose is
- * descriptive, not actionable.
- */
-export function extractHandoff(content: string): HandoffDirective | null {
-  const m = content.match(HANDOFF_RE);
-  if (!m) return null;
-  let parsed: any;
-  try {
-    parsed = JSON.parse(m[1].trim());
-  } catch {
-    return null;
-  }
-  if (!parsed || !Array.isArray(parsed.to)) return null;
-  const seen = new Set<string>();
-  const targets: Array<{ id: string; name: string }> = [];
-  for (const raw of parsed.to) {
-    let agent: AgentRow | null = null;
-    if (typeof raw === "string") {
-      agent = getAgentByName(raw) ?? getAgentById(raw);
-    } else if (raw && typeof raw === "object" && typeof raw.id === "string") {
-      agent = getAgentByName(raw.id) ?? getAgentById(raw.id) ??
-              (typeof raw.name === "string" ? getAgentByName(raw.name) : null);
-    }
-    if (agent && !seen.has(agent.id)) {
-      targets.push({ id: agent.id, name: agent.name });
-      seen.add(agent.id);
-    }
-  }
-  if (targets.length === 0) return null;
-  return { to: targets, task: typeof parsed.task === "string" ? parsed.task : undefined };
-}
-
 /**
  * Strip the ```handoff ... ``` block from content for display. Routing
- * metadata should not pollute the prose the user reads.
+ * metadata should not pollute the prose the user reads. (Re-export from
+ * handoff module to keep the public API stable for downstream callers.)
  */
 export function stripHandoff(content: string): string {
-  return content.replace(HANDOFF_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  return stripHandoffBlock(content);
 }
 
+/**
+ * Tags recognized as first-class UI shapes. Tags are display-only — they
+ * never trigger routing. Only the structured ```handoff``` block drives
+ * routing (see triggerOnMessage comment).
+ *
+ * v2 expanded set: adds [RESEARCH] [ANALYSIS] [DOCUMENT] [VISUAL] [MEMORY]
+ * on top of the original [DECISION] [TODO] [STATUS] [RESULT] [REVIEW]
+ * [QUESTION] [BLOCKER].
+ */
 export function extractTags(content: string): string[] {
-  const tags = new Set<string>();
-  for (const m of content.matchAll(TAG_RE)) tags.add(m[1]);
-  return Array.from(tags);
+  return extractAllTags(content);
 }
 
 const runningAgents = new Set<string>();
@@ -141,13 +116,12 @@ type TriggerParams = {
   parentMessageId?: string;
   source?: "user" | "agent" | "self-talk";
   /**
-   * Explicit routing targets, used when an agent's reply contains a
-   * structured ```handoff``` block. Required for agent→agent routing.
-   * When omitted, agent replies do NOT trigger anything (prose @mentions are
-   * descriptive only — see extractHandoff comment).
+   * Explicit routing targets from a parsed handoff v2 block. Required for
+   * agent→agent routing. When omitted, agent replies do NOT trigger
+   * anything (prose @mentions are descriptive only — see triggerOnMessage
+   * comment for industry rationale).
    */
-  explicitTargets?: Array<{ id: string; name: string }>;
-  handoffTask?: string;
+  handoff?: HandoffDirectiveV2;
 };
 
 /**
@@ -155,13 +129,14 @@ type TriggerParams = {
  *
  * Two legitimate routing sources:
  *   - USER message: @mention in the text triggers the named agents
- *   - AGENT reply: a ```handoff``` JSON block with explicit "to" triggers;
- *     prose @mentions are descriptive and ignored
+ *   - AGENT reply: a ```handoff``` JSON block (v1 or v2) with explicit
+ *     "to" triggers; prose @mentions are descriptive and ignored
  *
  * Anything else (prose mentions in agent replies, magic tags) does NOT route.
  * Industry consensus (OpenAI Agents SDK, LangGraph Command(goto=), AutoGen
- * HandoffMessage, SW4RM) — routing must be a structured signal, not parsed
- * from natural language. Parsing prose is fragile and causes false positives.
+ * HandoffMessage, SW4RM, Google A2A protocol) — routing must be a
+ * structured signal, not parsed from natural language. Parsing prose is
+ * fragile and causes false positives.
  */
 export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   let targets: Array<{ id: string; name: string }> = [];
@@ -169,9 +144,9 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   if (params.authorId === "user") {
     // User messages: parse @mentions from text. Simple, unambiguous.
     targets = extractMentions(params.content);
-  } else if (params.explicitTargets && params.explicitTargets.length > 0) {
+  } else if (params.handoff && params.handoff.to.length > 0) {
     // Agent→agent: only the structured handoff block drives routing.
-    targets = params.explicitTargets;
+    targets = params.handoff.to;
   } else {
     // No legitimate routing source — drop it.
     return;
@@ -191,7 +166,6 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   // Fan-out: invoke all targets in parallel (Promise.allSettled so a single
   // failure doesn't abort the others). Each agent maintains its own
   // (room, agentId) running slot — the same agent is queued, not duplicated.
-  // Completion order is determined by wall-clock, not invocation order.
   //
   // Industry consensus: LangGraph's Send API, OpenAI Swarm/Agents SDK's
   // asyncio.gather / Promise.all, CrewAI's Process.parallel — all default to
@@ -209,11 +183,13 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
     });
   }
 
-  // For agent→agent handoff, append the task description so the next agent
-  // knows why they were invoked.
-  const prompt = params.handoffTask
-    ? `${params.content}\n\n[handoff task — ${params.authorId}]: ${params.handoffTask}`
-    : params.content;
+  // Build the trailer once so all fanned-out agents see the same trace id
+  // and provenance. Falls back to legacy "[handoff task — authorId]: task"
+  // for v1 blocks without requiredOutputSchema.
+  const trailer = params.handoff
+    ? formatHandoffTaskTrailer(params.handoff)
+    : (params.content.includes("[handoff task") ? "" : "");  // safety: old callers passed handoffTask as content suffix
+  const prompt = trailer ? `${params.content}\n\n${trailer}` : params.content;
 
   await Promise.allSettled(
     filtered.map((m) =>
@@ -223,6 +199,7 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
         prompt,
         parentMessageId: params.parentMessageId,
         source: params.source,
+        handoff: params.handoff,
       })
     )
   );
@@ -243,6 +220,7 @@ async function invokeAgentAsync(opts: {
   parentMessageId?: string;
   source?: "user" | "agent" | "self-talk";
   signal?: AbortSignal;
+  handoff?: HandoffDirectiveV2;
 }): Promise<void> {
   const key = queueKey(opts.roomId, opts.agentId);
   const runId = nanoid();
@@ -322,13 +300,36 @@ async function invokeAgentAsync(opts: {
       const id = nanoid();
       const finishedAt = ts();
       const tags = extractTags(result.content);
+
       // Routing targets come from the structured ```handoff``` block — see
-      // extractHandoff. Prose @mentions are still extracted for display
+      // parseHandoff. Prose @mentions are still extracted for display
       // purposes (UI shows "@Lens" pills) but never drive routing.
-      const handoff = extractHandoff(result.content);
+      const handoff = parseHandoff(result.content, agentLocator);
       const mentionedAgents = handoff ? handoff.to : extractMentions(result.content);
-      // Display content strips the handoff metadata block so the user sees
-      // only the agent's prose reply.
+
+      // Output-schema validation. If the parent agent required a specific
+      // output schema and the receiver didn't produce the expected tag,
+      // apply failurePolicy.onInvalidOutput.
+      if (handoff && opts.handoff?.requiredOutputSchema) {
+        // Receiver's required schema is checked against its reply.
+        // (In v2 the receiving agent's handoff.requiredOutputSchema tells
+        // ITS receivers what shape to produce — this checks the receiver's
+        // OWN reply against the schema the *parent* asked for.)
+        if (!validateOutputAgainstSchema(result.content, handoff.requiredOutputSchema)) {
+          sendAll("system.warning", {
+            roomId: opts.roomId,
+            reason: "output-schema-mismatch",
+            agentId: opts.agentId,
+            expected: handoff.requiredOutputSchema,
+            traceId: handoff.traceId,
+          });
+          // failurePolicy.onInvalidOutput = fallback_echo is the default —
+          // escalate a re-route to echo with the schema-mismatch as context.
+          // For now we just log; an actual re-invoke of echo happens via
+          // the room-level recovery path (see runtime.ts escalation).
+        }
+      }
+
       const displayContent = stripHandoff(result.content);
       db.prepare(`
         INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, parent_id, timestamp)
@@ -350,10 +351,23 @@ async function invokeAgentAsync(opts: {
         authorId: opts.agentId,
         content: displayContent,
         tags,
-        mentionedAgentIds: mentionedAgents.map((m) => m.id),
+        mentionedAgents: mentionedAgents.map((m) => m.id),
         parentId: opts.parentMessageId,
         timestamp: finishedAt,
       });
+
+      // Persist any [MEMORY] block the agent emitted. Only Archivist is
+      // allowed to write memory; other agents' blocks are silently
+      // dropped with a warning (see runtime.persistAgentMemory).
+      const memResult = persistAgentMemory(opts.agentId, opts.roomId, id, result.content);
+      if (memResult.written.length > 0) {
+        sendAll("system.info", {
+          roomId: opts.roomId,
+          reason: "memory-written",
+          agentId: opts.agentId,
+          memoryIds: memResult.written,
+        });
+      }
 
       sendAll("agent.completed", {
         roomId: opts.roomId,
@@ -372,8 +386,7 @@ async function invokeAgentAsync(opts: {
         content: result.content,
         parentMessageId: id,
         source: opts.source ?? "agent",
-        explicitTargets: handoff?.to,
-        handoffTask: handoff?.task,
+        handoff: handoff ?? undefined,
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

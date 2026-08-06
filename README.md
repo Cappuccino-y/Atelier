@@ -231,32 +231,96 @@ curl -X PUT http://127.0.0.1:8787/api/runtime/agent-models \
 | Atlas | 编排器 | fast preset / Qwen-Flash | 只路由，不深想，便宜即可 |
 | Forge | 实现者 | MiniMax-M3 / DeepSeek-V4-Pro | 代码生成能力强 |
 | Lens  | 审查者 | MiniMax-M3 / Kimi-K2.6 | 仔细读 + 长上下文友好 |
-| Echo  | 支援 | fast preset | 短回复多，便宜省时间 |
+| Echo  | 支援 + 兜底 | preset:fast | 短回复 + always-available |
 | Trainer | 经验固化 | MiniMax-M3 | 结构化输出稳 |
+| Scout | 调研 | preset:fast | 多源读，便宜 |
+| Analyst | 分析 | qwen-3.6-saas / balanced | 推理仔细但不是顶配 |
+| Writer | 撰写 | qwen-3.6-saas / balanced | 文风感知 |
+| Archivist | KB | MiniMax-M3 / preset:deep | 提炼 evergreen pattern |
+| Vis | 视觉 | MiniMax-M3（**必须多模态**）| 图像 / 视频帧输入 |
 
 ---
 
-## 🧠 Agent 体系
+## 🧠 Agent 体系（v2 — 8 agents）
 
-四个内置专家在 `~/.config/opencode/agents/` 里：
+v2 roster 在 `~/.config/opencode/agents/` 里，按能力域拆开：
 
-| Agent | 角色 | 触发方式 |
-|---|---|---|
-| 🧭 **Atlas** | 编排（纯路由，绝不动手） | `@Atlas` |
-| 🔨 **Forge** | 实现（写代码 / 改配置 / 跑命令） | `@Forge` |
-| 🔍 **Lens**  | 评审（只读，找问题出 `[REVIEW]`） | `@Lens` 或 `[RESULT]` 后自动 |
-| 💬 **Echo**  | 支援（调研 / 总结 / 日常事务） | `@Echo` |
-| 📒 **Trainer**（可选）| 经验固化（KB / 模板 / 踩坑） | `@Trainer` |
+| Agent | 角色 | 触发方式 | 典型模型 |
+|---|---|---|---|
+| 🧭 **Atlas** | 编排（纯路由，绝不动手） | `@Atlas` | `minimax-MiniMax-M3-cp` |
+| 🔨 **Forge** | 实现（写代码 / 改配置 / 跑命令） | `@Forge` | `minimax-MiniMax-M3-cp` |
+| 🔍 **Lens**  | 评审（只读，找问题出 `[REVIEW]`） | `@Lens` 或 `[RESULT]` 后自动 | `minimax-MiniMax-M3-cp` |
+| 💬 **Echo**  | 支援 + **失败兜底** chain 第一站 | `@Echo` | `preset:fast`（Qwen-Flash） |
+| 📒 **Trainer** | 经验固化 / rules / template | `@Trainer` | `minimax-MiniMax-M3-cp` |
+| 🔎 **Scout** | 调研（多源交叉验证 → `[RESEARCH]`） | `@Scout` | `preset:fast` |
+| 📊 **Analyst** | 分析 / 对比 / 推断（带置信度 → `[ANALYSIS]`） | `@Analyst` | `qwen-3.6-saas` |
+| ✍️ **Writer** | 撰写报告 / 邮件 / 文档（→ `[DOCUMENT]`） | `@Writer` | `qwen-3.6-saas` |
+| 🗄️ **Archivist** | **唯一**允许写 `[MEMORY]` 的 agent | `@Archivist` | `minimax-MiniMax-M3-cp` |
+| 👁️ **Vis** | 视觉理解（图片 / 截图 / 视频帧 → `[VISUAL]`） | `@Vis` | `minimax-MiniMax-M3-cp` |
 
 ### 推进对话的两种方式
 
 1. **显式提及** —— `Hey @Forge，把 triggers.ts 改成 better-sqlite3 事务`
 2. **隐式交接** —— agent 输出 `[RESULT]` 时，Lens 自动被召唤做评审；若命中 `critical` / `major`，Forge 再被召唤返工。
 
+### Handoff v2 — Typed Payload
+
+agent 之间派活**必须**用结构化的 `\`\`\`handoff ... \`\`\`` 代码块（v1 兼容）。v2 在 v1 基础上加了：
+
+| 字段 | 作用 |
+|---|---|
+| `schemaVersion: "2.0"` | 协议版本（便于迁移） |
+| `traceId` | 整条任务链的 UUID（便于追溯） |
+| `taskSummary` | 取代 v1 `task`，明确字段名 |
+| `provenance` | 父 agent + 父消息 id + 上下文摘要 |
+| `requiredOutputSchema` | 下游必须产出的 tag（`result_block` / `review_block` / `research_brief` / `analysis` / `document` / `visual_brief` / `memory_write` 等） |
+| `constraints` | deadline / token 预算 |
+| `evidenceStandard` | `strict` / `balanced` / `loose` |
+| `failurePolicy` | `fallback_echo` / `retry` / `escalate`（默认 `fallback_echo`） |
+
+v1 仍可写，server 自动补全：
+
+```jsonc
+{"to": ["forge"], "task": "实现 selectFrame 兜底路径"}
+```
+
+v2 推荐写法：
+
+```jsonc
+{
+  "schemaVersion": "2.0",
+  "traceId": "f3b9e2f4-91d1-4d74-9a32-3c5b48fa2a63",
+  "to": ["scout", "analyst"],
+  "taskSummary": "调研 selectFrame 在 ZSL 路径下的兜底实现",
+  "requiredOutputSchema": "research_brief",
+  "evidenceStandard": "strict",
+  "failurePolicy": { "onInvalidOutput": "fallback_echo" }
+}
+```
+
+### 失败兜底 chain
+
+```
+specialist agent  →  echo (通用支援)  →  human via [BLOCKER]
+```
+
+主路由失败 → 自动 fallback_echo（最低 cost always-available 兜底） → 仍失败 → `[BLOCKER]` 让人介入。防止 echo 与 specialist 共享失败模式 — echo 只在主 agent 失败 / 超时时被动接手。
+
+### 长记忆（v2 skeleton）
+
+`server/data/memory/` 下按 scope 分文件：
+- `global.md` — 跨房间普适经验
+- `room_<id>.md` — 单房间私域
+- `agent_<id>.md` — 仅注入对应 agent
+- `project_<name>.md` — 按项目
+
+**`Archivist` 是唯一允许输出 `[MEMORY]` 块的 agent**，server 解析后 append-only 写入对应 scope 文件。下次任何 agent 被 invoke，server 自动把相关 memory 注入 prompt 头部的 `[MEMORY]` 块。其他 agent 的 `[MEMORY]` 块会被 server 丢弃 + 打 warning。
+
 ### 识别为一等 UI 形态的标签
 
 ```
 [DECISION]  [TODO]  [STATUS]  [RESULT]  [REVIEW]  [QUESTION]  [BLOCKER]
+[RESEARCH]  [ANALYSIS]  [DOCUMENT]  [VISUAL]  [MEMORY]   ← v2 新增
 ```
 
 ---

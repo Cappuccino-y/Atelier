@@ -3,35 +3,45 @@
   "_comment": "Per-agent model configuration. Edit freely; changes take effect on next server start (or use PUT /api/runtime/agent-models for hot reload).",
   "default": "custom-saas/minimax-MiniMax-M3-cp",
   "models": {
-    "atlas": "custom-saas/minimax-MiniMax-M3-cp",
-    "forge": "custom-saas/minimax-MiniMax-M3-cp",
-    "lens": "custom-saas/minimax-MiniMax-M3-cp",
-    "echo": "custom-saas/minimax-MiniMax-M3-cp",
-    "trainer": "custom-saas/minimax-MiniMax-M3-cp"
+    "atlas":     "custom-saas/minimax-MiniMax-M3-cp",
+    "forge":     "custom-saas/minimax-MiniMax-M3-cp",
+    "lens":      "custom-saas/minimax-MiniMax-M3-cp",
+    "echo":      "preset:fast",
+    "trainer":   "custom-saas/minimax-MiniMax-M3-cp",
+    "scout":     "preset:fast",
+    "analyst":   "custom-saas/qwen-3.6-saas",
+    "writer":    "custom-saas/qwen-3.6-saas",
+    "archivist": "custom-saas/minimax-MiniMax-M3-cp",
+    "vis":       "custom-saas/minimax-MiniMax-M3-cp"
   },
   "presets": {
     "_comment": "Predefined model aliases — useful for fast experimentation. Reference by setting the agent entry to one of these strings prefixed with 'preset:' (see notes).",
-    "fast": "comagic/qwen3.6-flash-saas",
+    "fast":     "comagic/qwen3.6-flash-saas",
     "balanced": "custom-saas/qwen-3.6-saas",
-    "deep": "custom-saas/glm-5-saas",
-    "vision": "custom-saas/minimax-MiniMax-M3-cp",
-    "coding": "custom-saas/minimax-MiniMax-M3-cp"
+    "deep":     "custom-saas/glm-5-saas",
+    "vision":   "custom-saas/minimax-MiniMax-M3-cp",
+    "coding":   "custom-saas/minimax-MiniMax-M3-cp"
   },
   "notes": {
     "_comment": "Free-form documentation block. Each model you put above should match a model listed in your opencode.json 'provider' section.",
-    "custom-saas/minimax-MiniMax-M3-cp": "Default MiniMax M3 — multimodal (image/video), strong reasoning, good for coding + review. Currently the default.",
-    "custom-saas/qwen-3.6-saas": "Qwen 3.6 via custom-saas gateway — balanced cost/quality.",
+    "custom-saas/minimax-MiniMax-M3-cp": "Default MiniMax M3 — multimodal (image/video), strong reasoning, good for coding + review + vision.",
+    "custom-saas/qwen-3.6-saas": "Qwen 3.6 via custom-saas gateway — balanced cost/quality. Used by Analyst + Writer for analysis & prose.",
     "custom-saas/glm-5-saas": "GLM 5 via custom-saas — deep reasoning, slower but more careful.",
-    "comagic/qwen3.6-flash-saas": "Qwen 3.6 flash via Comagic — fastest, cheapest, good for Echo/scout/echo tasks.",
+    "comagic/qwen3.6-flash-saas": "Qwen 3.6 flash via Comagic — fastest, cheapest. Used by Scout + Echo.",
     "comagic/kimi-k2.6-saas": "Kimi K2.6 — long-context friendly, good for large code review tasks.",
     "comagic/deepseek-v4-pro-saas": "DeepSeek V4 Pro — strong code generation, alternative to MiniMax M3.",
     "comagic/saas-minimax": "Legacy minimax via Comagic gateway — kept for compat.",
     "selection_tips": [
-      "Atlas (orchestrator): low-temp, fast model recommended — it doesn't think deeply, just routes. qwen3.6-flash works.",
+      "Atlas (orchestrator): fast/balanced is fine — it doesn't think deeply, just routes. preset:fast works.",
       "Forge (implementer): needs strong code generation — minimax-MiniMax-M3-cp or deepseek-v4-pro-saas.",
       "Lens (reviewer): needs careful reading — minimax-MiniMax-M3-cp or kimi-k2.6 (long context).",
-      "Echo (support): fast is fine — qwen3.6-flash is overkill-free.",
-      "Vision (image input): MUST be a model with image modality — minimax-MiniMax-M3-cp is multimodal."
+      "Echo (support + fallback): fast is fine — preset:fast.",
+      "Scout (research): fast — reads many sources, summarize. preset:fast.",
+      "Analyst (analysis): balanced — needs careful reasoning. qwen-3.6-saas.",
+      "Writer (prose): balanced — needs style awareness. qwen-3.6-saas.",
+      "Archivist (KB): deep — needs to extract evergreen patterns carefully. minimax-MiniMax-M3-cp or preset:deep.",
+      "Vis (vision): MUST be multimodal model — minimax-MiniMax-M3-cp.",
+      "Trainer (legacy): balanced — minimax-MiniMax-M3-cp."
     ]
   }
 }

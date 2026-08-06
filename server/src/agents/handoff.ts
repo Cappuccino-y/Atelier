@@ -1,0 +1,379 @@
+/**
+ * handoff.ts — Handoff v2 typed payload schema and parser.
+ *
+ * Industry consensus (OpenAI Agents SDK, Google A2A protocol, Anthropic
+ * multi-agent research, Microsoft Agent Framework) is that inter-agent
+ * payloads MUST be structured contracts, not free-text prose. The previous
+ * v1 format was `{"to": [...], "task": "..."}` — too thin, prone to silent
+ * drift. v2 adds:
+ *
+ *   - schemaVersion   — for backward-incompatible migrations
+ *   - traceId         — single id propagated through the entire task tree
+ *   - taskSummary     — replaces v1 `task` with explicit field
+ *   - provenance      — parent agent + parent message id + context excerpt
+ *   - requiredOutputSchema — what tag/output downstream agent must produce
+ *   - constraints     — deadline / token budget
+ *   - evidenceStandard — strict / balanced / loose (mirrors Anthropic's
+ *                       extended-thinking budget levels)
+ *   - failurePolicy   — fallback_echo / retry / escalate on invalid output
+ *
+ * Both v1 and v2 blocks are accepted on the wire. Parsing returns a
+ * normalized v2 object (HandoffDirectiveV2) with sensible defaults filled
+ * in, so callers don't need to branch on schema version.
+ */
+
+import { z } from "zod";
+import { nanoid } from "nanoid";
+
+/**
+ * What output schema the requesting agent expects from the receiving agent.
+ * Used by the server to validate the receiver's reply and trigger
+ * failurePolicy.onInvalidOutput if the produced tag doesn't match.
+ */
+export const OutputSchemaEnum = z.enum([
+  "result_block",     // [RESULT]
+  "review_block",     // [REVIEW] with severity
+  "decision_block",   // [DECISION]
+  "research_brief",   // [RESEARCH] — Scout
+  "analysis",         // [ANALYSIS] — Analyst
+  "document",         // [DOCUMENT] — Writer
+  "visual_brief",     // [VISUAL] — Vis
+  "memory_write",     // [MEMORY] — Archivist (only)
+  "answer_text",      // plain prose reply
+]);
+
+export type OutputSchema = z.infer<typeof OutputSchemaEnum>;
+
+/**
+ * What tag the agent should output for each OutputSchema. Used to validate
+ * the receiver's reply.
+ */
+export const OUTPUT_SCHEMA_TO_TAG: Record<OutputSchema, string> = {
+  result_block:   "RESULT",
+  review_block:   "REVIEW",
+  decision_block: "DECISION",
+  research_brief: "RESEARCH",
+  analysis:       "ANALYSIS",
+  document:       "DOCUMENT",
+  visual_brief:   "VISUAL",
+  memory_write:   "MEMORY",
+  answer_text:    "",
+};
+
+export const EvidenceStandardEnum = z.enum(["strict", "balanced", "loose"]);
+
+export const FailureActionEnum = z.enum(["fallback_echo", "retry", "escalate"]);
+
+/**
+ * Full v2 handoff schema. The server is permissive on `to` (accepts both
+ * v1 string-array form and richer object form) but strict on the wrapper
+ * fields once schemaVersion is present.
+ */
+export const HandoffPayloadV2Schema = z.object({
+  schemaVersion: z.literal("2.0"),
+  traceId: z.string().min(1),
+  to: z.array(z.string().min(1)).min(1),
+  taskSummary: z.string().min(1).max(2000),
+  provenance: z.object({
+    parentAgent: z.string().optional(),
+    parentMessageId: z.string().optional(),
+    contextExcerpt: z.string().max(2000).optional(),
+  }).optional(),
+  requiredOutputSchema: OutputSchemaEnum.optional(),
+  constraints: z.object({
+    deadlineMs: z.number().int().positive().optional(),
+    maxTokens: z.number().int().positive().optional(),
+  }).optional(),
+  evidenceStandard: EvidenceStandardEnum.optional(),
+  failurePolicy: z.object({
+    onInvalidOutput: FailureActionEnum.default("fallback_echo"),
+    onTimeout: FailureActionEnum.default("fallback_echo"),
+    maxRetries: z.number().int().min(0).max(3).default(1),
+  }).optional(),
+});
+
+export type HandoffPayloadV2 = z.infer<typeof HandoffPayloadV2Schema>;
+
+/**
+ * Loose v1 parser. We accept the old `{"to": [...], "task": "..."}` shape
+ * and coerce it into v2 with defaults. This lets us migrate gradually —
+ * existing agents will continue to work, and we can encourage them to
+ * upgrade via SHARED_RULES + audits.
+ */
+const HandoffPayloadV1Shape = z.object({
+  to: z.array(z.union([z.string(), z.object({ id: z.string().optional(), name: z.string().optional() })])).min(1),
+  task: z.string().optional(),
+});
+
+/**
+ * Top-level handoff directive after parsing + resolving agent ids. This
+ * is what triggers.ts / runtime.ts consume. It's always v2-shape
+ * regardless of what schema the producing agent wrote.
+ */
+export type HandoffDirectiveV2 = {
+  schemaVersion: "2.0";
+  traceId: string;
+  rawTraceId: string;          // traceId actually emitted by the agent (may be a UUID or anything)
+  to: Array<{ id: string; name: string; rawName: string }>;
+  taskSummary: string;
+  provenance?: HandoffPayloadV2["provenance"];
+  requiredOutputSchema?: OutputSchema;
+  constraints?: HandoffPayloadV2["constraints"];
+  evidenceStandard?: "strict" | "balanced" | "loose";
+  failurePolicy: {
+    onInvalidOutput: "fallback_echo" | "retry" | "escalate";
+    onTimeout: "fallback_echo" | "retry" | "escalate";
+    maxRetries: number;
+  };
+};
+
+/**
+ * Locator for an agent by name or id. Returns the resolved agent row or
+ * null. Imported lazily to avoid a circular dep with triggers.ts.
+ */
+export type AgentLocator = (raw: string) => { id: string; name: string } | null;
+
+export const HANDOFF_RE = /```handoff\s*\n([\s\S]*?)```/;
+
+/**
+ * Parse an agent's reply for a handoff block. Accepts both v1 and v2.
+ * Returns null if no block found, or a HandoffDirectiveV2 if the block
+ * parses + resolves to at least one known agent.
+ *
+ * IMPORTANT: The agent text must contain exactly one ```handoff``` block.
+ * If multiple are present, only the first is used (the others are stripped
+ * from the display content by stripHandoff).
+ */
+export function parseHandoff(content: string, locator: AgentLocator): HandoffDirectiveV2 | null {
+  const m = content.match(HANDOFF_RE);
+  if (!m) return null;
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(m[1].trim());
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== "object") return null;
+
+  const obj = raw as Record<string, unknown>;
+
+  // Branch on schemaVersion marker.
+  if (obj.schemaVersion === "2.0") {
+    const parsed = HandoffPayloadV2Schema.safeParse(obj);
+    if (!parsed.success) return null;
+    return resolveV2(parsed.data, locator);
+  }
+
+  // v1 fallback.
+  const v1 = HandoffPayloadV1Shape.safeParse(obj);
+  if (!v1.success) return null;
+
+  // Normalize v1 to v2 with defaults.
+  const toNames: string[] = [];
+  for (const entry of v1.data.to) {
+    if (typeof entry === "string") {
+      if (entry.length > 0) toNames.push(entry);
+    } else {
+      const idOrName = entry.id ?? entry.name ?? "";
+      if (typeof idOrName === "string" && idOrName.length > 0) toNames.push(idOrName);
+    }
+  }
+
+  const seen = new Set<string>();
+  const resolved: Array<{ id: string; name: string; rawName: string }> = [];
+  for (const rawName of toNames) {
+    const agent = locator(rawName);
+    if (agent && !seen.has(agent.id)) {
+      resolved.push({ id: agent.id, name: agent.name, rawName });
+      seen.add(agent.id);
+    }
+  }
+  if (resolved.length === 0) return null;
+
+  return {
+    schemaVersion: "2.0",
+    traceId: nanoid(),
+    rawTraceId: "(legacy-v1)",
+    to: resolved,
+    taskSummary: v1.data.task ?? "",
+    failurePolicy: { onInvalidOutput: "fallback_echo", onTimeout: "fallback_echo", maxRetries: 1 },
+  };
+}
+
+function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDirectiveV2 | null {
+  const seen = new Set<string>();
+  const resolved: Array<{ id: string; name: string; rawName: string }> = [];
+  for (const rawName of payload.to) {
+    const agent = locator(rawName);
+    if (agent && !seen.has(agent.id)) {
+      resolved.push({ id: agent.id, name: agent.name, rawName });
+      seen.add(agent.id);
+    }
+  }
+  if (resolved.length === 0) return null;
+  const fp = payload.failurePolicy ?? { onInvalidOutput: "fallback_echo" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };
+  return {
+    schemaVersion: "2.0",
+    traceId: payload.traceId ?? nanoid(),
+    rawTraceId: payload.traceId,
+    to: resolved,
+    taskSummary: payload.taskSummary,
+    provenance: payload.provenance,
+    requiredOutputSchema: payload.requiredOutputSchema,
+    constraints: payload.constraints,
+    evidenceStandard: payload.evidenceStandard,
+    failurePolicy: {
+      onInvalidOutput: fp.onInvalidOutput ?? "fallback_echo",
+      onTimeout: fp.onTimeout ?? "fallback_echo",
+      maxRetries: fp.maxRetries ?? 1,
+    },
+  };
+}
+
+/**
+ * Strip the handoff block for display purposes. Same as the old
+ * triggers.stripHandoff but kept here so it can be reused outside triggers.
+ */
+export function stripHandoffBlock(content: string): string {
+  return content.replace(HANDOFF_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * Format the handoff task trailer that gets appended to the receiving
+ * agent's prompt. v2 includes schemaVersion + traceId + provenance summary.
+ */
+export function formatHandoffTaskTrailer(directive: HandoffDirectiveV2): string {
+  const parts: string[] = [];
+  parts.push(`[handoff task — schemaVersion: ${directive.schemaVersion} — from: ${directive.provenance?.parentAgent ?? "unknown"} — traceId: ${directive.traceId}]`);
+  parts.push(directive.taskSummary);
+  if (directive.requiredOutputSchema) {
+    const expected = OUTPUT_SCHEMA_TO_TAG[directive.requiredOutputSchema];
+    parts.push(`\n[required output schema: ${directive.requiredOutputSchema}${expected ? ` — produce a [${expected}] tag block` : ""}]`);
+  }
+  if (directive.evidenceStandard) {
+    parts.push(`\n[evidence standard: ${directive.evidenceStandard}]`);
+  }
+  if (directive.provenance?.contextExcerpt) {
+    parts.push(`\n[context excerpt]:\n${directive.provenance.contextExcerpt}`);
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Validate a receiver's reply against the required output schema. Used by
+ * the orchestrator to decide whether failurePolicy.onInvalidOutput kicks
+ * in. Returns true if the output matches (or if no schema was required).
+ */
+export function validateOutputAgainstSchema(content: string, required?: OutputSchema): boolean {
+  if (!required) return true;
+  if (required === "answer_text") return content.trim().length > 0;
+  const expectedTag = OUTPUT_SCHEMA_TO_TAG[required];
+  if (!expectedTag) return true;
+  // Allow either [TAG] or [TAG:DEPRECATE] — a deprecation block is still
+  // a valid answer to a memory_write request, etc.
+  const re = new RegExp(`\\[${expectedTag}(:DEPRECATE)?(:\\w+)?\\]`, "i");
+  return re.test(content);
+}
+
+/**
+ * Extract all tags from a reply. Extended in v2 to recognize the new
+ * agent-specific tags: [RESEARCH], [ANALYSIS], [DOCUMENT], [VISUAL],
+ * [MEMORY].
+ */
+export const ALL_TAG_RE = /\[(DECISION|TODO|STATUS|RESULT|REVIEW|QUESTION|BLOCKER|RESEARCH|ANALYSIS|DOCUMENT|VISUAL|MEMORY)(?::DEPRECATE)?(?::\w+)?\]/g;
+
+export function extractAllTags(content: string): string[] {
+  const tags = new Set<string>();
+  for (const m of content.matchAll(ALL_TAG_RE)) tags.add(m[1]);
+  return Array.from(tags);
+}
+
+/**
+ * Extract a [MEMORY] block from Archivist's output. Returns the structured
+ * fields if parseable, null otherwise. Used by the server to append to
+ * server/data/memory/<scope>.md.
+ */
+export type MemoryEntry = {
+  scope: string;
+  category: string;
+  title: string;
+  content: string;
+  tags: string[];
+  confidence: "high" | "medium" | "low";
+  source: { messageIds: string[]; agentIds: string[] };
+  supersedes?: string;
+};
+
+const MEMORY_BLOCK_RE = /\[MEMORY\]\s*\n([\s\S]*?)(?=\n\[(?!MEMORY)|$)/;
+
+export function parseMemoryEntry(content: string): MemoryEntry | null {
+  const m = content.match(MEMORY_BLOCK_RE);
+  if (!m) return null;
+  const body = m[1];
+
+  const get = (key: string): string | undefined => {
+    // Try "key: value" on a single line, or "key:\n  value..." block.
+    // Skip the single-line path when the line is just "key: |" (YAML
+    // block scalar indicator) — fall through to multi-line block match.
+    const single = new RegExp(`^${key}:\\s+([^|\\s\\n][^\\n]*)$`, "m");
+    const s = body.match(single);
+    if (s && s[1].trim().length > 0) return s[1].trim();
+    const yamlBlock = new RegExp(`^${key}:\\s*\\|[ \\t]*\\n((?:[ \\t][^\\n]*\\n?)+)`, "m");
+    const yb = body.match(yamlBlock);
+    if (yb) return yb[1].replace(/^[ \t]+/gm, "").trim();
+    const block = new RegExp(`^${key}:\\s*\\n((?:[ \\t][^\\n]*\\n?)+)`, "m");
+    const b = body.match(block);
+    if (b) return b[1].replace(/^[ \t]+/gm, "").trim();
+    return undefined;
+  };
+
+  const scope = get("scope");
+  const category = get("category");
+  const title = get("title");
+  const contentVal = get("content");
+  const confidenceRaw = get("confidence");
+  const supersedes = get("supersedes");
+  if (!scope || !category || !title || !contentVal) return null;
+
+  // tags: [<tag1>, <tag2>] — split on comma, strip brackets/braces
+  const tagsRaw = get("tags") ?? "";
+  const tags = tagsRaw
+    .replace(/^\[|\]$/g, "")
+    .split(",")
+    .map((t) => t.trim().replace(/^["']|["']$/g, ""))
+    .filter((t) => t.length > 0);
+
+  // source: accept both flat (`source.messageIds: [...]`) and nested
+  // YAML (`source:\n  messageIds: [...]`) forms. Nested form is friendlier
+  // for archivist to write by hand.
+  const findNested = (parent: string, child: string): string => {
+    // Match an indented `child:` line anywhere under a `parent:` block.
+    // The body might have other blocks before/after, so use lookbehind-
+    // like anchoring: scan for `parent:` block, then look for indented
+    // `child:` within the next 4 lines.
+    const re = new RegExp(`^${parent}:[ \\t]*\\n(?:[ \\t]+[^\\n]+\\n?){0,4}[ \\t]+${child}:[ \\t]*([^\\n]+)`, "m");
+    const m = body.match(re);
+    return m ? m[1].trim() : "";
+  };
+  const sourceMsgRaw = get("source.messageIds") ?? findNested("source", "messageIds");
+  const sourceAgentRaw = get("source.agentIds") ?? findNested("source", "agentIds");
+  const sourceMsg = sourceMsgRaw.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean);
+  const sourceAgent = sourceAgentRaw.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean);
+
+  const confidence = (confidenceRaw === "high" || confidenceRaw === "medium" || confidenceRaw === "low")
+    ? confidenceRaw
+    : "medium";
+
+  const entry: MemoryEntry = {
+    scope,
+    category,
+    title,
+    content: contentVal,
+    tags,
+    confidence,
+    source: { messageIds: sourceMsg, agentIds: sourceAgent },
+  };
+  if (supersedes) entry.supersedes = supersedes;
+  return entry;
+}
