@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { nanoid } from "nanoid";
-import { config } from "./config.js";
+import { config, resolveAgentModel } from "./config.js";
 
 if (config.dbPath !== ":memory:") {
   mkdirSync(dirname(resolve(config.dbPath)), { recursive: true });
@@ -114,20 +114,20 @@ function seedDatabase() {
 
   const seed = db.transaction(() => {
     // v2 roster: 10 agents (5 existing + 5 new specialists) + user.
-    // model field is the opencode model key; resolveAgentModel() will
-    // override this at runtime with per-agent config from agent-models.json.
+    // model field is the opencode model key — resolved from agent-models.json
+    // (with env fallback) so the DB always reflects what actually runs.
     const agents: Array<[string, string, string, string, string, string, string, number]> = [
-      ["atlas",     "Atlas",     "orchestrator", "#8B5CF6", "A", config.opencodeModel, "online", now],
-      ["forge",     "Forge",     "implementer",  "#F97316", "F", config.opencodeModel, "idle",   now],
-      ["lens",      "Lens",      "reviewer",     "#06B6D4", "L", config.opencodeModel, "idle",   now],
-      ["echo",      "Echo",      "support",      "#22C55E", "E", config.opencodeModel, "idle",   now],
-      ["trainer",   "Trainer",   "kb-curator",   "#A855F7", "T", config.opencodeModel, "idle",   now],
-      ["scout",     "Scout",     "researcher",   "#10B981", "S", config.opencodeModel, "idle",   now],
-      ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y", config.opencodeModel, "idle",   now],
-      ["writer",    "Writer",    "writer",       "#3B82F6", "W", config.opencodeModel, "idle",   now],
-      ["archivist", "Archivist", "archivist",    "#6366F1", "R", config.opencodeModel, "idle",   now],
-      ["vis",       "Vis",       "vision",       "#EC4899", "V", config.opencodeModel, "idle",   now],
-      ["user",      "You",       "user",         "#64748B", "U", "human",              "online", now],
+      ["atlas",     "Atlas",     "orchestrator", "#8B5CF6", "A", resolveAgentModel("atlas"),     "online", now],
+      ["forge",     "Forge",     "implementer",  "#F97316", "F", resolveAgentModel("forge"),     "idle",   now],
+      ["lens",      "Lens",      "reviewer",     "#06B6D4", "L", resolveAgentModel("lens"),      "idle",   now],
+      ["echo",      "Echo",      "support",      "#22C55E", "E", resolveAgentModel("echo"),      "idle",   now],
+      ["trainer",   "Trainer",   "kb-curator",   "#A855F7", "T", resolveAgentModel("trainer"),   "idle",   now],
+      ["scout",     "Scout",     "researcher",   "#10B981", "S", resolveAgentModel("scout"),     "idle",   now],
+      ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y", resolveAgentModel("analyst"),   "idle",   now],
+      ["writer",    "Writer",    "writer",       "#3B82F6", "W", resolveAgentModel("writer"),    "idle",   now],
+      ["archivist", "Archivist", "archivist",    "#6366F1", "R", resolveAgentModel("archivist"), "idle",   now],
+      ["vis",       "Vis",       "vision",       "#EC4899", "V", resolveAgentModel("vis"),       "idle",   now],
+      ["user",      "You",       "user",         "#64748B", "U", "human",                       "online", now],
     ];
     for (const agent of agents) insertAgent.run(...agent);
 
@@ -264,21 +264,21 @@ if (roomCount.count === 0) seedDatabase();
  * databases that were seeded with the v1 (4-agent) roster. Runs on
  * every server start; uses INSERT OR IGNORE so it's idempotent.
  *
- * Each entry: [id, name, role, color, avatar, defaultModel].
- * The model is the opencode model key; resolveAgentModel() at
- * runtime overrides it with per-agent overrides from agent-models.json.
+ * Each entry: [id, name, role, color, avatar]. The model is resolved via
+ * resolveAgentModel() (agent-models.json, env fallback) so the DB column
+ * always reflects what actually runs — same source of truth as the seed.
  */
-const V2_AGENT_DEFAULTS: Array<[string, string, string, string, string, string]> = [
-  ["atlas",     "Atlas",     "orchestrator", "#8B5CF6", "A", "custom-saas/minimax-MiniMax-M3-cp"],
-  ["forge",     "Forge",     "implementer",  "#F97316", "F", "custom-saas/minimax-MiniMax-M3-cp"],
-  ["lens",      "Lens",      "reviewer",     "#06B6D4", "L", "custom-saas/minimax-MiniMax-M3-cp"],
-  ["echo",      "Echo",      "support",      "#22C55E", "E", "comagic/qwen3.6-flash-saas"],
-  ["trainer",   "Trainer",   "kb-curator",   "#A855F7", "T", "custom-saas/minimax-MiniMax-M3-cp"],
-  ["scout",     "Scout",     "researcher",   "#10B981", "S", "comagic/qwen3.6-flash-saas"],
-  ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y", "custom-saas/qwen-3.6-saas"],
-  ["writer",    "Writer",    "writer",       "#3B82F6", "W", "custom-saas/qwen-3.6-saas"],
-  ["archivist", "Archivist", "archivist",    "#6366F1", "R", "custom-saas/minimax-MiniMax-M3-cp"],
-  ["vis",       "Vis",       "vision",       "#EC4899", "V", "custom-saas/minimax-MiniMax-M3-cp"],
+const V2_AGENT_DEFAULTS: Array<[string, string, string, string, string]> = [
+  ["atlas",     "Atlas",     "orchestrator", "#8B5CF6", "A"],
+  ["forge",     "Forge",     "implementer",  "#F97316", "F"],
+  ["lens",      "Lens",      "reviewer",     "#06B6D4", "L"],
+  ["echo",      "Echo",      "support",      "#22C55E", "E"],
+  ["trainer",   "Trainer",   "kb-curator",   "#A855F7", "T"],
+  ["scout",     "Scout",     "researcher",   "#10B981", "S"],
+  ["analyst",   "Analyst",   "analyst",      "#F59E0B", "Y"],
+  ["writer",    "Writer",    "writer",       "#3B82F6", "W"],
+  ["archivist", "Archivist", "archivist",    "#6366F1", "R"],
+  ["vis",       "Vis",       "vision",       "#EC4899", "V"],
 ];
 
 function migrateAgentsV2(): void {
@@ -287,8 +287,8 @@ function migrateAgentsV2(): void {
     INSERT OR IGNORE INTO agents (id, name, role, color, avatar, model, status, last_seen)
     VALUES (?, ?, ?, ?, ?, ?, 'idle', ?)
   `);
-  for (const [id, name, role, color, avatar, model] of V2_AGENT_DEFAULTS) {
-    insertAgent.run(id, name, role, color, avatar, model, now);
+  for (const [id, name, role, color, avatar] of V2_AGENT_DEFAULTS) {
+    insertAgent.run(id, name, role, color, avatar, resolveAgentModel(id), now);
   }
 }
 migrateAgentsV2();

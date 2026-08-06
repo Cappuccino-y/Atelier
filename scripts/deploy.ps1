@@ -178,7 +178,6 @@ $OpencodeAgentsDir = Join-Path $OpencodeRoot "agents"
 $OpencodeJson = Join-Path $OpencodeRoot "opencode.json"
 $ServerEnv = Join-Path $Root "server\.env"
 $AgentModelsJson = Join-Path $Root "server\agent-models.json"
-$AgentModelsExample = Join-Path $Root "server\agent-models.json"
 $TemplateDir = Join-Path $Root "opencode-config"
 $TemplateAgentsDir = Join-Path $TemplateDir "agents"
 $TemplateAgentsJson = Join-Path $TemplateDir "opencode-agents.template.json"
@@ -239,8 +238,13 @@ if (Test-Path $TemplateAgentsJson) {
       }
     }
     if ($null -eq $userConfig) {
-      # Write a minimal opencode.json with only the agent block; user must add provider/mcp themselves
-      Warn "no existing $OpencodeJson — writing template (provider/mcp blocks NOT included)"
+      # Write a minimal opencode.json with only the agent block. There is no
+      # full example in the repo, so provider/mcp blocks can't be staged here —
+      # warn loudly, since a config without them can't reach the LLM.
+      Warn "no existing $OpencodeJson — writing agent-only template"
+      Say "  [!] opencode.json has NO provider/mcp blocks yet. Copy them from a"
+      Say "      working setup, or run 'opencode auth login' first — otherwise"
+      Say "      'atelier start' agents can't reach any LLM."
       $template | ConvertTo-Json -Depth 10 | Set-Content -Path $OpencodeJson -Encoding UTF8
       Ok "$OpencodeJson created"
     } else {
