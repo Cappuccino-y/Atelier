@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,10 +35,10 @@ export type AgentRunResult = {
 };
 
 const MOCK_RESPONSES: Record<string, string> = {
-  atlas: "[DECISION] 收到。让 Forge 去实现，@Forge 实现这个需求。\n\n[RESULT] 已分派给 Forge。",
-  forge: "[RESULT] 实现完成（mock）。变更：新增 2 个文件，修改 1 个函数。\n\n@Lens 请 review。",
-  lens: "[REVIEW]\n- **minor**: 命名一致性\n  - location: src/foo.ts:42\n  - quote: const a = 1\n  - suggested: 改为 const count = 1\n\n@Atlas 收尾。",
-  echo: "[QUESTION] 这个问题需要更多信息。\n\n@Atlas 帮我确认下细节。",
+  atlas: `[DECISION] 收到，拆分为实现任务。\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":["forge"],"taskSummary":"实现需求（mock）","requiredOutputSchema":"result_block"}\n\`\`\``,
+  forge: `[RESULT] 实现完成（mock）。变更：新增 2 个文件，修改 1 个函数。\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":["lens"],"taskSummary":"review 上述实现（mock）","requiredOutputSchema":"review_block"}\n\`\`\``,
+  lens: `[REVIEW]\n- **minor**: 命名一致性\n  - location: src/foo.ts:42\n  - quote: const a = 1\n  - suggested: 改为 const count = 1\n\nLens 全部 minor，无需返工。`,
+  echo: `[QUESTION] 这个问题需要更多信息。\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":["atlas"],"taskSummary":"澄清需求（mock）","requiredOutputSchema":"decision_block"}\n\`\`\``,
 };
 
 export async function runOpenCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
@@ -103,13 +103,13 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 
     const timer = setTimeout(() => {
       killed = true;
-      try { child.kill("SIGKILL"); } catch {}
+      killTree(child);
     }, timeoutMs);
 
     // external abort (Stop button)
     const onAbort = () => {
       aborted = true;
-      try { child.kill("SIGKILL"); } catch {}
+      killTree(child);
     };
     if (opts.signal) {
       if (opts.signal.aborted) onAbort();
@@ -147,9 +147,7 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
         const reason = (o.part as { reason?: string })?.reason ?? "stop";
         emit?.({ type: "step_finish", reason });
       } else if (o.type === "error") {
-        const msg = typeof o.error === "string"
-          ? o.error
-          : (o.error?.message ?? "opencode error");
+        const msg = extractErrorMsg(o.error) || "opencode error";
         emit?.({ type: "error", message: msg });
       }
     };
@@ -226,11 +224,13 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 export function parseOpenCodeOutput(stdout: string): AgentRunResult {
   const { objects: events } = consumeJsonObjects(stdout);
   const textParts: string[] = [];
+  const errors: string[] = [];
 
   for (const obj of events as Array<{
     type?: unknown;
     text?: unknown;
     part?: { type?: unknown; text?: unknown };
+    error?: { message?: string } | string;
   }>) {
     // opencode json format: { "type":"text", "part": { "type":"text", "text":"..." } }
     const partText = obj.part?.text;
@@ -239,15 +239,47 @@ export function parseOpenCodeOutput(stdout: string): AgentRunResult {
     } else if (obj.type === "text" && typeof obj.text === "string") {
       // fallback for older formats
       textParts.push(obj.text);
+    } else if (obj.type === "error") {
+      // opencode reports failures as `{"type":"error","error":{...}}` events on
+      // STDOUT — NOT stderr. Swallowing these is why a failed run showed the
+      // useless "(no output)" instead of the actual error. Surface them.
+      const msg = extractErrorMsg(obj.error);
+      if (msg) errors.push(msg);
     }
   }
 
   const content = textParts.join("").trim();
+  if (content.length > 0) {
+    return { content, success: true, rawEvents: events };
+  }
+  if (errors.length > 0) {
+    return { content: errors.join("; "), success: false, error: errors.join("; "), rawEvents: events };
+  }
   return {
     content,
-    success: content.length > 0,
+    success: false,
     rawEvents: events,
   };
+}
+
+/**
+ * Pull a readable message out of opencode's `error` field. opencode nests
+ * the message in several shapes:
+ *   - `"error": "string"`
+ *   - `"error": {"message": "..."}`
+ *   - `"error": {"name":"...", "data": {"message": "...", "ref": "..."}}`
+ * Returns "" when nothing readable is present.
+ */
+function extractErrorMsg(err: unknown): string {
+  if (typeof err === "string") return err.trim();
+  if (!err || typeof err !== "object") return "";
+  const o = err as Record<string, any>;
+  if (typeof o.message === "string" && o.message.trim()) return o.message.trim();
+  if (o.data && typeof o.data === "object") {
+    if (typeof o.data.message === "string" && o.data.message.trim()) return o.data.message.trim();
+    try { return JSON.stringify(o.data).slice(0, 300); } catch { /* fall through */ }
+  }
+  try { return JSON.stringify(o).slice(0, 300); } catch { return ""; }
 }
 
 /**
@@ -324,7 +356,25 @@ export function registerRun(runId: string, child: ChildProcess): void {
 export function killRun(runId: string): boolean {
   const child = activeChildren.get(runId);
   if (!child) return false;
-  try { child.kill("SIGKILL"); } catch {}
+  killTree(child);
   activeChildren.delete(runId);
   return true;
+}
+
+/**
+ * Kill the process AND its children. On Windows child.kill() only kills the
+ * immediate cmd.exe shim — the spawned `opencode` grandchild keeps running
+ * and holds the stdout pipe, so the parent's 'close' event never fires and
+ * the run promise hangs forever (leaking the agent's running slot). taskkill
+ * /T walks the whole process tree.
+ */
+function killTree(child: ChildProcess): void {
+  try {
+    if (child.pid == null) return;
+    if (process.platform === "win32") {
+      execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch { /* ignore */ }
 }

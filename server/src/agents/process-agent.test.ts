@@ -146,4 +146,26 @@ it("joins multi-paragraph text correctly", () => {
     assert.equal(result.content, "");
     assert.equal(result.success, false);
   });
+
+  it("surfaces opencode error events instead of '(no output)'", () => {
+    // opencode emits failures as `{"type":"error","error":{...}}` JSON events
+    // on STDOUT (not stderr). They must not be silently dropped.
+    const stdout =
+      `{"type":"step_start"}` + "\n" +
+      `{"type":"error","error":{"message":"model 'bogus/model' not found"}}` + "\n" +
+      `{"type":"step_finish","part":{"reason":"error"}}`;
+    const result = parseOpenCodeOutput(stdout);
+    assert.equal(result.success, false);
+    assert.equal(result.error, "model 'bogus/model' not found");
+    assert.ok(result.content.includes("model 'bogus/model' not found"), "error shown in content");
+  });
+
+  it("prefers real text over error events", () => {
+    const stdout =
+      `{"type":"error","error":{"message":"late failure"}}` + "\n" +
+      `{"type":"text","part":{"type":"text","text":"先输出了一段正文"}}`;
+    const result = parseOpenCodeOutput(stdout);
+    assert.equal(result.success, true);
+    assert.equal(result.content, "先输出了一段正文");
+  });
 });
