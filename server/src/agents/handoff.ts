@@ -65,12 +65,18 @@ export const EvidenceStandardEnum = z.enum(["strict", "balanced", "loose"]);
 export const FailureActionEnum = z.enum(["fallback_echo", "retry", "escalate"]);
 
 /**
- * Full v2 handoff schema. The server is permissive on `to` (accepts both
- * v1 string-array form and richer object form) but strict on the wrapper
- * fields once schemaVersion is present.
+ * Full v2.1 handoff schema. v2.1 adds optional `intent` (semantic intent
+ * of the handoff — e.g. "verify_fix" / "request_analysis") and
+ * `attachmentRefs` (references to images, files, prior message ids that
+ * downstream agents should look at). The server is permissive on `to`
+ * (accepts both v1 string-array form and richer object form) but strict
+ * on the wrapper fields once schemaVersion is present.
+ *
+ * v2.0 → v2.1 migration: just include any new optional fields you need.
+ * Older v2.0 blocks still parse because every v2.1 field is optional.
  */
-export const HandoffPayloadV2Schema = z.object({
-  schemaVersion: z.literal("2.0"),
+export const HandoffPayloadV2_1Schema = z.object({
+  schemaVersion: z.union([z.literal("2.0"), z.literal("2.1")]),
   traceId: z.string().min(1),
   to: z.array(z.string().min(1)).min(1),
   taskSummary: z.string().min(1).max(2000),
@@ -90,9 +96,17 @@ export const HandoffPayloadV2Schema = z.object({
     onTimeout: FailureActionEnum.default("fallback_echo"),
     maxRetries: z.number().int().min(0).max(3).default(1),
   }).optional(),
+  /** v2.1 only — semantic intent of this handoff (free-text, 1-200 chars). */
+  intent: z.string().min(1).max(200).optional(),
+  /** v2.1 only — references to images / files / message ids downstream
+   *  agents should consult. Free-form strings; server doesn't dereference. */
+  attachmentRefs: z.array(z.string().min(1)).max(20).optional(),
 });
 
-export type HandoffPayloadV2 = z.infer<typeof HandoffPayloadV2Schema>;
+/** @deprecated use HandoffPayloadV2_1Schema for new code. Kept as alias. */
+export const HandoffPayloadV2Schema = HandoffPayloadV2_1Schema;
+
+export type HandoffPayloadV2 = z.infer<typeof HandoffPayloadV2_1Schema>;
 
 /**
  * Loose v1 parser. We accept the old `{"to": [...], "task": "..."}` shape
@@ -111,7 +125,7 @@ const HandoffPayloadV1Shape = z.object({
  * regardless of what schema the producing agent wrote.
  */
 export type HandoffDirectiveV2 = {
-  schemaVersion: "2.0";
+  schemaVersion: "2.0" | "2.1";
   traceId: string;
   rawTraceId: string;          // traceId actually emitted by the agent (may be a UUID or anything)
   to: Array<{ id: string; name: string; rawName: string }>;
@@ -120,6 +134,11 @@ export type HandoffDirectiveV2 = {
   requiredOutputSchema?: OutputSchema;
   constraints?: HandoffPayloadV2["constraints"];
   evidenceStandard?: "strict" | "balanced" | "loose";
+  /** v2.1 only — semantic intent of this handoff. */
+  intent?: string;
+  /** v2.1 only — references to images / files / message ids downstream
+   *  agents should consult. */
+  attachmentRefs?: string[];
   failurePolicy: {
     onInvalidOutput: "fallback_echo" | "retry" | "escalate";
     onTimeout: "fallback_echo" | "retry" | "escalate";
@@ -158,9 +177,10 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
 
   const obj = raw as Record<string, unknown>;
 
-  // Branch on schemaVersion marker.
-  if (obj.schemaVersion === "2.0") {
-    const parsed = HandoffPayloadV2Schema.safeParse(obj);
+  // Branch on schemaVersion marker. v2.0 and v2.1 share the same parser
+  // — the only difference is optional `intent` / `attachmentRefs` fields.
+  if (obj.schemaVersion === "2.0" || obj.schemaVersion === "2.1") {
+    const parsed = HandoffPayloadV2_1Schema.safeParse(obj);
     if (!parsed.success) return null;
     return resolveV2(parsed.data, locator);
   }
@@ -214,7 +234,7 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
   if (resolved.length === 0) return null;
   const fp = payload.failurePolicy ?? { onInvalidOutput: "fallback_echo" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };
   return {
-    schemaVersion: "2.0",
+    schemaVersion: payload.schemaVersion,
     traceId: payload.traceId ?? nanoid(),
     rawTraceId: payload.traceId,
     to: resolved,
@@ -223,6 +243,8 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
     requiredOutputSchema: payload.requiredOutputSchema,
     constraints: payload.constraints,
     evidenceStandard: payload.evidenceStandard,
+    intent: payload.intent,
+    attachmentRefs: payload.attachmentRefs,
     failurePolicy: {
       onInvalidOutput: fp.onInvalidOutput ?? "fallback_echo",
       onTimeout: fp.onTimeout ?? "fallback_echo",
@@ -241,12 +263,19 @@ export function stripHandoffBlock(content: string): string {
 
 /**
  * Format the handoff task trailer that gets appended to the receiving
- * agent's prompt. v2 includes schemaVersion + traceId + provenance summary.
+ * agent's prompt. v2.1 includes schemaVersion + traceId + provenance +
+ * intent + attachmentRefs summary.
  */
 export function formatHandoffTaskTrailer(directive: HandoffDirectiveV2): string {
   const parts: string[] = [];
   parts.push(`[handoff task — schemaVersion: ${directive.schemaVersion} — from: ${directive.provenance?.parentAgent ?? "unknown"} — traceId: ${directive.traceId}]`);
   parts.push(directive.taskSummary);
+  if (directive.intent) {
+    parts.push(`\n[intent]: ${directive.intent}`);
+  }
+  if (directive.attachmentRefs && directive.attachmentRefs.length > 0) {
+    parts.push(`\n[attachment refs]: ${directive.attachmentRefs.join(", ")}`);
+  }
   if (directive.requiredOutputSchema) {
     const expected = OUTPUT_SCHEMA_TO_TAG[directive.requiredOutputSchema];
     parts.push(`\n[required output schema: ${directive.requiredOutputSchema}${expected ? ` — produce a [${expected}] tag block` : ""}]`);

@@ -22,7 +22,7 @@
  * dependency — agents must still produce useful output without it.
  */
 
-import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MemoryEntry } from "./handoff.js";
@@ -214,6 +214,10 @@ export function loadScopeMemory(scope: MemoryScope, opts?: { limit?: number; tag
  *   - global (workspace-wide)
  *   - agent-tagged (entries whose tags include the agent id)
  *
+ * Phase 4: scoring + supersession filtering + dedup. Older entries that
+ * have been superseded by `[MEMORY:DEPRECATE]` or by a newer entry
+ * pointing at them via `supersedes:` are excluded by default.
+ *
  * Capped at MAX_INJECT_ENTRIES total to avoid bloating prompts.
  */
 const MAX_INJECT_ENTRIES = 12;
@@ -222,31 +226,246 @@ export function loadRelevantMemory(opts: {
   agentId: string;
   roomId?: string;
   limit?: number;
-}): Array<{ id: string; ts: number; entry: MemoryEntry }> {
+  query?: string;            // optional query string for relevance scoring
+  includeDeprecated?: boolean; // default false — exclude superseded entries
+}): Array<{ id: string; ts: number; entry: MemoryEntry; score: number }> {
   const limit = opts.limit ?? MAX_INJECT_ENTRIES;
+  const includeDeprecated = opts.includeDeprecated ?? false;
   const seen = new Set<string>();
-  const out: Array<{ id: string; ts: number; entry: MemoryEntry }> = [];
+  const out: Array<{ id: string; ts: number; entry: MemoryEntry; score: number }> = [];
 
+  // Collect all candidates first, then filter + score + dedup + sort.
+  const candidates: Array<{ id: string; ts: number; entry: MemoryEntry }> = [];
   const collect = (entries: Array<{ id: string; ts: number; entry: MemoryEntry }>) => {
     for (const e of entries) {
       if (seen.has(e.id)) continue;
       seen.add(e.id);
-      out.push(e);
-      if (out.length >= limit) return true;
+      candidates.push(e);
     }
     return false;
   };
 
   // 1. room-scoped first (most contextually relevant)
-  if (opts.roomId) {
-    if (collect(loadScopeMemory({ kind: "room", roomId: opts.roomId }))) return out;
-  }
+  if (opts.roomId) collect(loadScopeMemory({ kind: "room", roomId: opts.roomId }));
   // 2. agent-scoped
-  if (collect(loadScopeMemory({ kind: "agent", agentId: opts.agentId }))) return out;
+  collect(loadScopeMemory({ kind: "agent", agentId: opts.agentId }));
   // 3. global
-  if (collect(loadScopeMemory({ kind: "global" }))) return out;
+  collect(loadScopeMemory({ kind: "global" }));
 
+  // Build a set of memoryIds that have been deprecated.
+  const deprecatedIds = new Set<string>();
+  if (!includeDeprecated) {
+    for (const c of candidates) {
+      if (isDeprecated(c.entry)) deprecatedIds.add(c.id);
+      if (typeof c.entry.supersedes === "string" && c.entry.supersedes.length > 0) {
+        deprecatedIds.add(c.entry.supersedes);
+      }
+    }
+  }
+
+  // Filter, score, dedup.
+  const queryTokens = tokenize(opts.query ?? "");
+  for (const c of candidates) {
+    if (deprecatedIds.has(c.id)) continue;
+    const score = scoreMemory(c.entry, queryTokens, opts.agentId);
+    out.push({ ...c, score });
+  }
+  // Newest-first tiebreaker after score.
+  out.sort((a, b) => (b.score - a.score) || (b.ts - a.ts));
+  return out.slice(0, limit);
+}
+
+/**
+ * Heuristic: was this entry deprecated via [MEMORY:DEPRECATE]?
+ * Matches both the title prefix (case-insensitive) and the
+ * supersedes: chain — anything that has been replaced by a newer entry.
+ */
+export function isDeprecated(entry: MemoryEntry): boolean {
+  const t = entry.title.toLowerCase();
+  if (t.startsWith("[memory:deprecate]")) return true;
+  if (/\bdeprecated\b/.test(t)) return true;
+  if (/已废弃|已弃用/.test(entry.title)) return true;
+  // Any entry that has been superseded is deprecated (the entry itself
+  // is the newer one; the older one is filtered by the supersededBy chain).
+  if (typeof entry.supersedes === "string" && entry.supersedes.length > 0) return true;
+  return false;
+}
+
+/**
+ * TF-IDF-like scoring: tag hits weigh most, title next, content body
+ * last. When no query is given, returns 1.0 for everything (newest-first
+ * sort still applies via the tiebreaker).
+ */
+export function scoreMemory(entry: MemoryEntry, queryTokens: string[], agentId: string): number {
+  if (queryTokens.length === 0) return 1;
+
+  let score = 0;
+  const titleLower = entry.title.toLowerCase();
+  const contentLower = entry.content.toLowerCase();
+  const tagsLower = entry.tags.map((t) => t.toLowerCase());
+
+  for (const tok of queryTokens) {
+    if (tagsLower.includes(tok)) score += 3;      // tag match = strongest signal
+    else if (titleLower.includes(tok)) score += 2;
+    else if (contentLower.includes(tok)) score += 1;
+  }
+
+  // Mild bonus for entries tagged with this agent id — they were
+  // explicitly written for this agent's consumption.
+  if (tagsLower.includes(agentId.toLowerCase())) score += 0.5;
+
+  return score;
+}
+
+function tokenize(s: string): string[] {
+  return s.toLowerCase()
+    .split(/[^a-z0-9\u4e00-\u9fff]+/i)
+    .filter((t) => t.length >= 2);
+}
+
+/**
+ * Detect near-duplicate entries based on tag Jaccard similarity +
+ * title fuzzy match. Used at append time to warn the caller (and at
+ * compaction time to merge duplicates).
+ */
+export function findDuplicate(
+  candidate: MemoryEntry,
+  existing: Array<{ id: string; ts: number; entry: MemoryEntry }>,
+  threshold = 0.6,
+): { id: string; similarity: number } | null {
+  let best: { id: string; similarity: number } | null = null;
+  const candTags = new Set(candidate.tags.map((t) => t.toLowerCase()));
+  const candTitleWords = new Set(candidate.title.toLowerCase().split(/\s+/).filter((w) => w.length >= 3));
+
+  for (const e of existing) {
+    if (e.entry.title === candidate.title) {
+      // Exact title match → almost certainly a dup.
+      return { id: e.id, similarity: 1 };
+    }
+    const eTags = new Set(e.entry.tags.map((t) => t.toLowerCase()));
+    let inter = 0;
+    for (const t of candTags) if (eTags.has(t)) inter++;
+    const union = candTags.size + eTags.size - inter;
+    const jaccardTags = union === 0 ? 0 : inter / union;
+
+    const eTitleWords = new Set(e.entry.title.toLowerCase().split(/\s+/).filter((w) => w.length >= 3));
+    let titleInter = 0;
+    for (const w of candTitleWords) if (eTitleWords.has(w)) titleInter++;
+    const titleUnion = candTitleWords.size + eTitleWords.size - titleInter;
+    const jaccardTitle = titleUnion === 0 ? 0 : titleInter / titleUnion;
+
+    const similarity = 0.6 * jaccardTags + 0.4 * jaccardTitle;
+    if (similarity >= threshold && (best === null || similarity > best.similarity)) {
+      best = { id: e.id, similarity };
+    }
+  }
+  return best;
+}
+
+/**
+ * Mark an entry as deprecated by appending `[MEMORY:DEPRECATE]` to its
+ * title. Used when a newer entry supersedes an older one or when a user
+ * explicitly asks for deprecation via the REST API.
+ */
+export function deprecateMemoryEntry(memoryId: string, scopeKind: MemoryScope): boolean {
+  // Read raw file, find the entry block by id, prepend DEPRECATE marker
+  // to the title line.
+  const file = join(MEMORY_DIR, scopeToFilename(scopeKind));
+  if (!existsSync(file)) return false;
+  let content: string;
+  try {
+    content = readFileSync(file, "utf8");
+  } catch {
+    return false;
+  }
+
+  const idMarker = `memoryId: ${memoryId}`;
+  const idx = content.indexOf(idMarker);
+  if (idx < 0) return false;
+
+  // Find the title line that follows this memoryId marker.
+  const afterMarker = content.slice(idx);
+  const titleMatch = afterMarker.match(/^title:\s*(.+)$/m);
+  if (!titleMatch) return false;
+
+  const oldTitle = titleMatch[0];
+  const newTitle = oldTitle.replace(/^title:\s*/, "title: [MEMORY:DEPRECATE] ");
+  // Replace only the FIRST occurrence (which is the one after our marker).
+  const updated = content.slice(0, idx) + content.slice(idx).replace(oldTitle, newTitle);
+
+  try {
+    writeFileSync(file, updated, "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * List all memory entries across all scopes. Used by the REST API and
+ * by compaction. Sorts by timestamp descending.
+ */
+export function listAllMemory(opts?: { limit?: number }): Array<{
+  scope: MemoryScope; id: string; ts: number; entry: MemoryEntry;
+}> {
+  const out: Array<{ scope: MemoryScope; id: string; ts: number; entry: MemoryEntry }> = [];
+  if (!existsSync(MEMORY_DIR)) return out;
+
+  for (const file of readdirSync(MEMORY_DIR)) {
+    if (!file.endsWith(".md")) continue;
+    let raw: string;
+    try { raw = readFileSync(join(MEMORY_DIR, file), "utf8"); } catch { continue; }
+    const scope = filenameToScope(file);
+    if (!scope) continue;
+    for (const { id, ts, entry } of parseMemoryFile(raw)) {
+      out.push({ scope, id, ts, entry });
+    }
+  }
+  out.sort((a, b) => b.ts - a.ts);
+  if (opts?.limit && out.length > opts.limit) return out.slice(0, opts.limit);
   return out;
+}
+
+function filenameToScope(filename: string): MemoryScope | null {
+  if (filename === "global.md") return { kind: "global" };
+  if (filename.startsWith("room_") && filename.endsWith(".md")) {
+    return { kind: "room", roomId: filename.slice("room_".length, -".md".length) };
+  }
+  if (filename.startsWith("project_") && filename.endsWith(".md")) {
+    return { kind: "project", name: filename.slice("project_".length, -".md".length) };
+  }
+  if (filename.startsWith("agent_") && filename.endsWith(".md")) {
+    return { kind: "agent", agentId: filename.slice("agent_".length, -".md".length) };
+  }
+  return null;
+}
+
+/**
+ * Per-scope entry count stats for the /api/memory/stats endpoint.
+ */
+export function memoryStats(): {
+  total: number;
+  deprecated: number;
+  byScope: Record<string, number>;
+  byCategory: Record<string, number>;
+  byConfidence: Record<string, number>;
+} {
+  const all = listAllMemory();
+  const stats = {
+    total: all.length,
+    deprecated: 0,
+    byScope: {} as Record<string, number>,
+    byCategory: {} as Record<string, number>,
+    byConfidence: {} as Record<string, number>,
+  };
+  for (const { entry, scope } of all) {
+    if (isDeprecated(entry)) stats.deprecated++;
+    const scopeKey = scopeToLabel(scope);
+    stats.byScope[scopeKey] = (stats.byScope[scopeKey] ?? 0) + 1;
+    stats.byCategory[entry.category] = (stats.byCategory[entry.category] ?? 0) + 1;
+    stats.byConfidence[entry.confidence] = (stats.byConfidence[entry.confidence] ?? 0) + 1;
+  }
+  return stats;
 }
 
 /**

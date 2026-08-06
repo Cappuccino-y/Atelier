@@ -269,7 +269,7 @@ agent 之间派活**必须**用结构化的 `\`\`\`handoff ... \`\`\`` 代码块
 
 | 字段 | 作用 |
 |---|---|
-| `schemaVersion: "2.0"` | 协议版本（便于迁移） |
+| `schemaVersion: "2.0"` / `"2.1"` | 协议版本（v2.1 加了 intent / attachmentRefs） |
 | `traceId` | 整条任务链的 UUID（便于追溯） |
 | `taskSummary` | 取代 v1 `task`，明确字段名 |
 | `provenance` | 父 agent + 父消息 id + 上下文摘要 |
@@ -277,6 +277,8 @@ agent 之间派活**必须**用结构化的 `\`\`\`handoff ... \`\`\`` 代码块
 | `constraints` | deadline / token 预算 |
 | `evidenceStandard` | `strict` / `balanced` / `loose` |
 | `failurePolicy` | `fallback_echo` / `retry` / `escalate`（默认 `fallback_echo`） |
+| `intent` *(v2.1)* | 语义意图（"verify_fix" / "request_analysis" 等） |
+| `attachmentRefs` *(v2.1)* | 引用的图片 / 文件 / 消息 id 列表 |
 
 v1 仍可写，server 自动补全：
 
@@ -284,37 +286,96 @@ v1 仍可写，server 自动补全：
 {"to": ["forge"], "task": "实现 selectFrame 兜底路径"}
 ```
 
-v2 推荐写法：
+v2.1 推荐写法：
 
 ```jsonc
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "traceId": "f3b9e2f4-91d1-4d74-9a32-3c5b48fa2a63",
   "to": ["scout", "analyst"],
   "taskSummary": "调研 selectFrame 在 ZSL 路径下的兜底实现",
+  "intent": "verify_fallback_path",
+  "attachmentRefs": ["msg-100", "msg-101"],
   "requiredOutputSchema": "research_brief",
   "evidenceStandard": "strict",
-  "failurePolicy": { "onInvalidOutput": "fallback_echo" }
+  "failurePolicy": { "onInvalidOutput": "fallback_echo", "maxRetries": 1 }
 }
 ```
 
-### 失败兜底 chain
+### 隐式路由（Phase 2 — 14 条规则）
+
+agent 没显式写 `\`\`\`handoff\`\`\`` 块时，server 用 tag 模式触发自动路由：
+
+| 触发 | 路由到 | 触发条件 |
+|---|---|---|
+| `[RESULT]` from Forge | Lens review | 默认 |
+| `[RESULT]` 含 `reusable` / `通用经验` / `// reusable:` | **+** Archivist 自动归档 | 检测可复用 pattern |
+| `[REVIEW]` critical/major from Lens | Forge 返工 | 严重度 ≥ major |
+| `[REVIEW]` + `[STATUS]` done + 全 minor | Atlas 收尾 | clean review |
+| `[REVIEW]` 含 `建议归档` | **+** Archivist | Lens 显式标 |
+| `[RESEARCH]` 长 / 多条事实 from Scout | Analyst 分析 | 多个 findings |
+| `[RESEARCH]` 简短 from Scout | Atlas 收尾 | 简单查询 |
+| `[ANALYSIS]` 含 `建议报告/文档` | **+** Writer 文档化 | 需要落地 |
+| `[ANALYSIS]` 其他 | Atlas 收尾 | 默认 |
+| `[DOCUMENT]` from Writer | Lens review 文档 | review prose |
+| `[VISUAL]` 含 `error/null` | **+** Analyst 分析 | 错误诊断 |
+| `[VISUAL]` 含 `mockup/design/设计` | **+** Writer 文档化 | 设计落地 |
+| `[VISUAL]` 其他 | Atlas 收尾 | 默认 |
+| `[MEMORY]` from Archivist | Atlas 收尾 | KB 写入完成 |
+
+可在 `server/src/agents/implicit-handoff.ts` 里改 / 加规则。
+
+### 失败兜底 chain + 重试（Phase 2/3）
 
 ```
-specialist agent  →  echo (通用支援)  →  human via [BLOCKER]
+specialist agent  ─fail─►  echo (fallback_echo)  ─fail─►  [BLOCKER] (escalate)
+                       │
+                       └─►  retry with exponential backoff (maxRetries 0-3, total budget 30s)
 ```
 
-主路由失败 → 自动 fallback_echo（最低 cost always-available 兜底） → 仍失败 → `[BLOCKER]` 让人介入。防止 echo 与 specialist 共享失败模式 — echo 只在主 agent 失败 / 超时时被动接手。
+- `failurePolicy.onInvalidOutput = "retry"` → 重试同一 agent，prompt 追加 schema 错配说明
+- `failurePolicy.onInvalidOutput = "fallback_echo"` → 派 Echo 接管，Echo 若失败 → escalate
+- `failurePolicy.onInvalidOutput = "escalate"` → 立即 [BLOCKER]
 
-### 长记忆（v2 skeleton）
+重试用 AWS-style 指数退避 + full jitter：base 500ms，每次 cap 翻倍，最大 8s，总预算 30s。
 
-`server/data/memory/` 下按 scope 分文件：
+### 长记忆（Phase 4 全功能）
+
+`server/data/memory/` 下按 scope 分文件（append-only markdown）：
 - `global.md` — 跨房间普适经验
 - `room_<id>.md` — 单房间私域
 - `agent_<id>.md` — 仅注入对应 agent
 - `project_<name>.md` — 按项目
 
-**`Archivist` 是唯一允许输出 `[MEMORY]` 块的 agent**，server 解析后 append-only 写入对应 scope 文件。下次任何 agent 被 invoke，server 自动把相关 memory 注入 prompt 头部的 `[MEMORY]` 块。其他 agent 的 `[MEMORY]` 块会被 server 丢弃 + 打 warning。
+**写入规则**：
+- `Archivist` 是唯一允许输出 `[MEMORY]` 块的 agent；其他 agent 输出 `[MEMORY]` 会被丢弃 + warning
+- 每次写入追加 `memoryId` + 时间戳；支持 `supersedes: <memoryId>` 链接
+- `deprecateMemoryEntry()` 通过前置 `[MEMORY:DEPRECATE]` 标记废弃
+
+**检索规则**（每次 agent invoke 自动注入）：
+- 评分：tag 命中 ×3 + title 命中 ×2 + content 命中 ×1
+- 自动排除 `[MEMORY:DEPRECATE]` 条目和被 `supersedes` 指向的旧条目
+- 同 agent 标签的条目 +0.5 加分
+- 跨 scope 合并：room → agent → global，按分数 + 时间排序
+
+**REST API**：
+```
+GET  /api/memory/list?scope=global&limit=50&includeDeprecated=false
+GET  /api/memory/stats                                  # counts by scope/category/confidence
+GET  /api/memory/search?q=elink+中文&limit=10          # 关键词搜索（带评分）
+POST /api/memory/deprecate {memoryId, scopeKind, ...}   # 标记废弃
+GET  /api/memory/path                                    # server.data/memory 路径
+GET  /api/runtime/handoff-chain/:messageId               # 整条任务链追溯
+```
+
+### 显式 vs 隐式 vs 兜底 优先级
+
+```
+1. schema 校验失败  →  failurePolicy.onInvalidOutput (retry/fallback_echo/escalate)
+2. agent 显式 handoff 块  →  解析 v1/v2 → 路由
+3. agent 输出 tag pattern  →  14 条隐式规则
+4. 都没有  →  停止（不让 prose @mention 误触发）
+```
 
 ### 识别为一等 UI 形态的标签
 
@@ -453,6 +514,12 @@ GET    /api/runtime/status
 GET    /api/runtime/agent-models      # ⭐ 看 per-agent 模型配置
 PUT    /api/runtime/agent-models      # ⭐ 原子覆盖配置
 POST   /api/runtime/agent-models/reload
+GET    /api/runtime/handoff-chain/:messageId  # ⭐ 追溯整条任务链
+GET    /api/memory/list?scope=global&limit=50 # ⭐ KB 条目列表
+GET    /api/memory/stats                     # ⭐ KB 统计
+GET    /api/memory/search?q=...&limit=10     # ⭐ KB 关键词搜索
+POST   /api/memory/deprecate {memoryId,...}  # ⭐ 标记 KB 条目废弃
+GET    /api/memory/path                      # KB 存储路径
 ```
 
 ### WebSocket 事件（28 个，server → client）

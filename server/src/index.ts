@@ -17,6 +17,7 @@ const routeNames = [
   "mcp",
   "runtime",
   "debug",
+  "memory",
 ] as const;
 
 type RouteModule = {
