@@ -10,7 +10,7 @@ type Props = {
   disabled?: boolean;
 };
 
-const MIN_HEIGHT = 110;
+const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 320;
 
 const MENTION_RE = /@([\w\u4e00-\u9fff]+)/g;

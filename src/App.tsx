@@ -42,7 +42,7 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
-  const [streamingAgentId, setStreamingAgentId] = useState<string | undefined>();
+  const [streamingAgentMap, setStreamingAgentMap] = useState<Record<string, string>>({});
   const [streamingText, setStreamingText] = useState<Record<string, string>>({});
   const [streamingTool, setStreamingTool] = useState<Record<string, string>>({});
   const [activeRunId, setActiveRunId] = useState<string | undefined>();
@@ -93,7 +93,8 @@ export default function App() {
 
   const currentRoom = useMemo(() => rooms.find(r => r.id === currentRoomId), [rooms, currentRoomId]);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
-  const streamingAgent = streamingAgentId ? agentMap.get(streamingAgentId) ?? null : null;
+  const currentStreamingAgentId = currentRoomId ? streamingAgentMap[currentRoomId] : undefined;
+  const streamingAgent = currentStreamingAgentId ? agentMap.get(currentStreamingAgentId) ?? null : null;
 
   // stable ref for activity appender (avoid re-binding ws handler)
   const pushActivity = useRef((ev: Omit<ActivityEvent, "id" | "timestamp">) => {
@@ -244,8 +245,8 @@ export default function App() {
         }
         case "agent.thinking": {
           const p = payload as { roomId: string; agentId: string; message?: string; pending?: boolean; runId?: string };
-          if (p.roomId === currentRoomId && p.agentId && !p.pending) {
-            setStreamingAgentId(p.agentId);
+          if (p.agentId && !p.pending) {
+            setStreamingAgentMap(prev => ({ ...prev, [p.roomId]: p.agentId }));
             if (p.runId) setActiveRunId(p.runId);
           }
           pushActivity({
@@ -302,9 +303,11 @@ export default function App() {
         }
         case "agent.completed": {
           const p = payload as { roomId: string; agentId: string; elapsedMs?: number; runId?: string };
-          if (p.roomId === currentRoomId && streamingAgentId === p.agentId) {
-            setStreamingAgentId(undefined);
-          }
+          setStreamingAgentMap(prev => {
+            const next = { ...prev };
+            if (next[p.roomId] === p.agentId) delete next[p.roomId];
+            return next;
+          });
           if (activeRunId && p.runId === activeRunId) setActiveRunId(undefined);
           // clear streaming buffers immediately (not via rAF) so no stale delta
           // leaks into a future run by the same agent.
@@ -331,9 +334,11 @@ export default function App() {
         }
         case "agent.error": {
           const p = payload as { roomId: string; agentId: string; error: string };
-          if (p.roomId === currentRoomId && streamingAgentId === p.agentId) {
-            setStreamingAgentId(undefined);
-          }
+          setStreamingAgentMap(prev => {
+            const next = { ...prev };
+            if (next[p.roomId] === p.agentId) delete next[p.roomId];
+            return next;
+          });
           setActiveRunId(undefined);
           delete streamBufferRef.current[p.agentId];
           delete streamToolRef.current[p.agentId];
@@ -385,14 +390,7 @@ export default function App() {
       }
     });
     return unsub;
-  }, [currentRoomId, streamingAgentId, activeRunId, pushActivity, scheduleFlush]);
-
-  // Clear streamingAgent when switching rooms
-  useEffect(() => {
-    setStreamingAgentId(undefined);
-    setStreamingText({});
-    setStreamingTool({});
-  }, [currentRoomId]);
+  }, [currentRoomId, streamingAgentMap, activeRunId, pushActivity, scheduleFlush]);
 
   // Handlers
   const handleCreateRoom = useCallback(async (body: { name: string; topic: string; projectId?: string }) => {
@@ -500,27 +498,30 @@ export default function App() {
 
   const handleStopStreaming = useCallback(async () => {
     if (!currentRoomId) return;
+    const agentId = streamingAgentMap[currentRoomId];
+    if (!agentId) return;
     try {
       await api.stopAgent({
         roomId: currentRoomId,
-        agentId: streamingAgentId,
+        agentId,
         runId: activeRunId,
       });
-      setStreamingAgentId(undefined);
+      setStreamingAgentMap(prev => {
+        const next = { ...prev };
+        delete next[currentRoomId];
+        return next;
+      });
       setActiveRunId(undefined);
       toast.info("Stopped current generation");
     } catch (err) {
       toast.error("Failed to stop", { detail: String(err) });
     }
-  }, [currentRoomId, streamingAgentId, activeRunId]);
+  }, [currentRoomId, streamingAgentMap, activeRunId]);
 
   const handleStopAll = useCallback(async () => {
-    // Ask the server to actually cancel in-flight runs before clearing local
-    // UI state — otherwise the agent can still complete and emit messages
-    // after the panel claims it was stopped.
     try {
       const result = await api.stopAgents(currentRoomId ? { roomId: currentRoomId } : {});
-      setStreamingAgentId(undefined);
+      setStreamingAgentMap({});
       setActivities([]);
       if (result.cancelled > 0) {
         toast.info(`Stopped ${result.cancelled} running agent${result.cancelled === 1 ? "" : "s"}`);
