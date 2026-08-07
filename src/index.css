@@ -257,15 +257,6 @@
     animation: card-in 0.25s ease-out both;
   }
 
-  /* room content fade-in on switch */
-  @keyframes room-fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-  .animate-room-in {
-    animation: room-fade-in 0.15s ease-out;
-  }
-
   /* toast slide-in */
   @keyframes toast-in {
     from {

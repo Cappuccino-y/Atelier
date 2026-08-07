@@ -120,7 +120,7 @@ export function AppShell(props: Props) {
         />
         <main className="flex-1 flex flex-col min-w-0">
           {props.currentRoom ? (
-            <div key={props.currentRoom.id} className="flex-1 flex flex-col min-w-0 animate-room-in">
+            <div className="flex-1 flex flex-col min-w-0">
               <RoomHeader
                 room={props.currentRoom}
                 agents={props.agents}
