@@ -46,6 +46,7 @@ db.exec(`
     findings TEXT NOT NULL DEFAULT '[]',
     parent_id TEXT,
     mentioned_agent_ids TEXT NOT NULL DEFAULT '[]',
+    reactions TEXT NOT NULL DEFAULT '{}',
     timestamp INTEGER NOT NULL
   );
 

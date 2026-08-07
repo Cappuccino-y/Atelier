@@ -35,6 +35,32 @@ export async function routes(app: FastifyInstance) {
 
     return msg;
   });
+
+  app.post<{ Params: { roomId: string; messageId: string }; Body: { emoji: string } }>(
+    "/api/rooms/:roomId/messages/:messageId/reactions",
+    async (req, reply) => {
+      const { emoji } = req.body;
+      if (!emoji) return reply.code(400).send({ error: "emoji required" });
+
+      const row = db.prepare("SELECT * FROM messages WHERE id = ?").get(req.params.messageId) as any;
+      if (!row) return reply.code(404).send({ error: "message not found" });
+
+      const reactions = JSON.parse(row.reactions || "{}");
+      const existing = reactions[emoji];
+      if (existing) {
+        existing.count += 1;
+      } else {
+        reactions[emoji] = { count: 1 };
+      }
+
+      db.prepare("UPDATE messages SET reactions = ? WHERE id = ?")
+        .run(JSON.stringify(reactions), req.params.messageId);
+
+      const updated = normalizeMessage(db.prepare("SELECT * FROM messages WHERE id = ?").get(req.params.messageId) as any);
+      sendAll("message.updated", updated);
+      return updated;
+    }
+  );
 }
 
 function normalizeMessage(m: any) {
@@ -45,6 +71,7 @@ function normalizeMessage(m: any) {
     findings: m.findings ? JSON.parse(m.findings) : null,
     parentId: m.parent_id,
     mentionedAgentIds: JSON.parse(m.mentioned_agent_ids || "[]"),
+    reactions: JSON.parse(m.reactions || "{}"),
     timestamp: m.timestamp,
   };
 }

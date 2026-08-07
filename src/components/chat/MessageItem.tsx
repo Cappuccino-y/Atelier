@@ -15,14 +15,16 @@ import {
   MessageCircleQuestion,
   Diamond,
 } from "lucide-react";
-import { useState } from "react";
-import type { Message, Agent, Finding } from "@/types";
+import { useState, useCallback } from "react";
+import { api } from "@/lib/api";
+import type { Message, Agent, Finding, MessageReactions } from "@/types";
 
 type Props = {
   message: Message;
   author?: Agent;
   mentionedAgents?: Agent[];
   isGrouped?: boolean;
+  index?: number;
 };
 
 const SEVERITY_STYLE: Record<string, { bar: string; badge: string }> = {
@@ -223,7 +225,7 @@ function QuestionCard({
       </div>
       <div className="p-3 space-y-2">
         <div className="prose-chat text-[13px] text-zinc-800 leading-relaxed">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{body}</ReactMarkdown>
         </div>
         <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-zinc-200 rounded-md focus-within:border-cyan-400 focus-within:ring-2 focus-within:ring-cyan-100">
           <input
@@ -262,7 +264,7 @@ function DecisionCard({
       </div>
       <div className="p-3 space-y-1">
         <div className="prose-chat text-[13px] text-zinc-800 leading-relaxed">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{body}</ReactMarkdown>
         </div>
         <p className="text-[10.5px] text-zinc-500">
           Recorded at {formatTime(timestamp)}
@@ -296,7 +298,7 @@ function BlockerCard({
       </div>
       <div className="p-3 space-y-1.5">
         <div className="prose-chat text-[13px] text-zinc-800 leading-relaxed">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{body}</ReactMarkdown>
         </div>
         <p className="text-[10.5px] text-zinc-500 flex items-center gap-1">
           <span>Owner:</span>
@@ -331,6 +333,61 @@ function findAgentNameInText(text: string): string | null {
   return best?.name ?? null;
 }
 
+function CodeBlock({ className, children }: { className?: string; children: React.ReactNode }) {
+  const match = /language-(\w+)/.exec(className ?? "");
+  const language = match ? match[1] : "";
+  const code = String(children).replace(/\n$/, "");
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(code).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div className="relative group">
+      <div className="flex items-center justify-between px-3 py-1 bg-zinc-200/50 border-b border-zinc-300/50 rounded-t-lg text-[10px] text-zinc-500">
+        {language ? (
+          <span className="font-mono font-medium">{language}</span>
+        ) : (
+          <span />
+        )}
+        <button
+          onClick={copy}
+          className="flex items-center gap-1 px-2 py-0.5 rounded text-zinc-500 hover:text-zinc-900 hover:bg-zinc-300/50 transition-colors"
+        >
+          <Copy className="h-3 w-3" />
+          <span>{copied ? "Copied" : "Copy"}</span>
+        </button>
+      </div>
+      <pre className="!mt-0 !rounded-t-none">
+        <code className={className}>{children}</code>
+      </pre>
+    </div>
+  );
+}
+
+const markdownComponents = {
+  code({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) {
+    const isInline = !className;
+    if (isInline) return <code className={className} {...props}>{children}</code>;
+    return <CodeBlock className={className}>{children}</CodeBlock>;
+  },
+  img({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
+    return (
+      <span className="inline-block max-w-full my-1">
+        <img
+          src={src}
+          alt={alt ?? ""}
+          className="max-w-full rounded-lg border border-zinc-200 shadow-sm"
+          loading="lazy"
+        />
+      </span>
+    );
+  },
+};
+
 function TodoCard({ content }: { content: string }) {
   const body = stripTag(content, "TODO");
   const [checked, setChecked] = useState(false);
@@ -364,7 +421,7 @@ function TodoCard({ content }: { content: string }) {
               checked && "[&_p]:line-through [&_p]:text-zinc-500"
             )}
           >
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{body}</ReactMarkdown>
           </div>
         </label>
       </div>
@@ -393,7 +450,7 @@ function TimelineRow({
         </span>
       </div>
       <div className="mt-0.5 prose-chat text-[13.5px] leading-relaxed text-zinc-700">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
           {stripTag(content, "STATUS")}
         </ReactMarkdown>
       </div>
@@ -406,10 +463,12 @@ export function MessageItem({
   author,
   mentionedAgents = [],
   isGrouped,
+  index = 0,
 }: Props) {
   const isUser = message.authorId === "user";
   const findings: Finding[] = message.findings ?? [];
   const [copied, setCopied] = useState(false);
+  const staggerDelay = Math.min(index * 30, 150);
 
   const authorName = author?.name ?? message.authorId;
   const authorColor = author?.color ?? "#888";
@@ -481,8 +540,10 @@ export function MessageItem({
         isUser ? "flex-row-reverse" : "flex-row",
         isGrouped ? "py-0.5" : "pt-3 pb-1"
       )}
+      style={{ animationDelay: `${staggerDelay}ms` }}
     >
-      <div className="w-9 shrink-0">
+      <div className="w-9 shrink-0 relative">
+        {isGrouped && <span className="thread-line" />}
         {!isGrouped && (
           <div
             className="h-9 w-9 rounded-full flex items-center justify-center text-xs font-semibold text-white ring-2 ring-white shadow-sm"
@@ -540,7 +601,7 @@ export function MessageItem({
                   isUser && "prose-invert"
                 )}
               >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                   {message.content}
                 </ReactMarkdown>
               </div>
@@ -575,7 +636,11 @@ export function MessageItem({
                   isUser ? "items-end self-end" : "items-stretch w-full"
                 )}
               >
-                {tags.map(renderSignalCard)}
+                {tags.map((tag, tagIdx) => (
+                  <div key={tag} className="animate-card-in" style={{ animationDelay: `${tagIdx * 60}ms` }}>
+                    {renderSignalCard(tag)}
+                  </div>
+                ))}
               </div>
             )}
 
@@ -600,9 +665,76 @@ export function MessageItem({
                 ))}
               </div>
             )}
+
+            <ReactionsBar roomId={message.roomId} messageId={message.id} reactions={message.reactions} />
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+const EMOJI_PICKER = ["👍", "🎉", "❤️", "😄", "😢", "🔥"];
+
+function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messageId: string; reactions?: MessageReactions }) {
+  const [showPicker, setShowPicker] = useState(false);
+  const [localReactions, setLocalReactions] = useState<MessageReactions>(reactions ?? {});
+
+  const handleReact = useCallback(async (emoji: string) => {
+    setShowPicker(false);
+    try {
+      const updated = await api.toggleReaction(roomId, messageId, emoji);
+      if (updated.reactions) setLocalReactions(updated.reactions);
+    } catch {}
+  }, [roomId, messageId]);
+
+  const entries = Object.entries(localReactions);
+  if (entries.length === 0 && !showPicker) {
+    return (
+      <div className="mt-1 flex">
+        <button
+          onClick={() => setShowPicker(true)}
+          className="opacity-0 group-hover:opacity-100 text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded transition-opacity"
+          title="Add reaction"
+        >
+          + Reaction
+        </button>
+        {showPicker && (
+          <div className="flex gap-1 ml-1">
+            {EMOJI_PICKER.map(e => (
+              <button key={e} onClick={() => handleReact(e)} className="text-sm hover:scale-110 transition-transform">{e}</button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+      {entries.map(([emoji, data]) => (
+        <button
+          key={emoji}
+          onClick={() => handleReact(emoji)}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] bg-zinc-100 border border-zinc-200 hover:bg-zinc-200 transition-colors"
+        >
+          <span>{emoji}</span>
+          <span className="text-zinc-600 font-medium">{data.count}</span>
+        </button>
+      ))}
+      <button
+        onClick={() => setShowPicker(v => !v)}
+        className="text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        +
+      </button>
+      {showPicker && (
+        <div className="flex gap-1">
+          {EMOJI_PICKER.filter(e => !entries.some(([k]) => k === e)).map(e => (
+            <button key={e} onClick={() => handleReact(e)} className="text-sm hover:scale-110 transition-transform">{e}</button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

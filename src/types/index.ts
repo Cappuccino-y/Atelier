@@ -9,6 +9,8 @@ export type Agent = {
   lastSeen?: number;
 };
 
+export type MessageReactions = Record<string, { count: number }>;
+
 export type Message = {
   id: string;
   roomId: string;
@@ -18,6 +20,7 @@ export type Message = {
   findings?: Finding[] | null;
   parentId?: string | null;
   mentionedAgentIds?: string[];
+  reactions?: MessageReactions;
   timestamp: number;
 };
 
@@ -98,6 +101,7 @@ export type AgentStatus = "online" | "offline" | "busy" | "idle";
 
 export type ServerEvent =
   | "message.created"
+  | "message.updated"
   | "task.created"
   | "task.updated"
   | "task.deleted"

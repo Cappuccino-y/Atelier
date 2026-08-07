@@ -188,6 +188,13 @@ export default function App() {
           }
           break;
         }
+        case "message.updated": {
+          const msg = payload as Message;
+          if (msg.roomId === currentRoomId) {
+            setMessages(curr => curr.map(m => m.id === msg.id ? msg : m));
+          }
+          break;
+        }
         case "task.created": {
           const t = payload as Task;
           if (t.roomId === currentRoomId) setTasks(curr => [t, ...curr]);
@@ -540,8 +547,29 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center text-sm text-muted-foreground">
-        Loading Atelier…
+      <div className="h-screen flex flex-col bg-background">
+        <div className="h-12 bg-zinc-50 border-b border-border" />
+        <div className="flex flex-1 min-h-0">
+          <div className="w-64 border-r border-border p-3 space-y-2">
+            {[1,2,3,4,5].map(i => (
+              <div key={i} className="h-10 shimmer rounded-lg" />
+            ))}
+          </div>
+          <div className="flex-1 p-6 space-y-4">
+            <div className="h-6 w-48 shimmer rounded-md" />
+            <div className="space-y-3">
+              {[1,2,3].map(i => (
+                <div key={i} className="flex gap-3">
+                  <div className="h-9 w-9 rounded-full shimmer shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-4 w-32 shimmer rounded" />
+                    <div className="h-16 shimmer rounded-lg" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }

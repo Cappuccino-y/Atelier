@@ -120,7 +120,7 @@ export function AppShell(props: Props) {
         />
         <main className="flex-1 flex flex-col min-w-0">
           {props.currentRoom ? (
-            <>
+            <div key={props.currentRoom.id} className="flex-1 flex flex-col min-w-0 animate-room-in">
               <RoomHeader
                 room={props.currentRoom}
                 agents={props.agents}
@@ -143,7 +143,7 @@ export function AppShell(props: Props) {
                 onStopStreaming={props.onStopStreaming}
               />
               <Composer agents={props.agents} onSend={props.onSendMessage} />
-            </>
+            </div>
           ) : (
             <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
               Select or create a room to start

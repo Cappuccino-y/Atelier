@@ -4,7 +4,7 @@
   "default": "custom-saas/minimax-MiniMax-M3-cp",
   "models": {
     "atlas": "custom-saas/qwen3.7-plus",
-    "forge": "custom-saas/deepseek-deepseek-v4-flash-cp",
+    "forge": "custom-saas/deepseek-v4-flash-saas",
     "lens": "custom-saas/minimax-MiniMax-M3-cp",
     "echo": "custom-saas/qwen3.6-flash-saas",
     "trainer": "custom-saas/minimax-MiniMax-M2.7-cp",
@@ -19,7 +19,7 @@
     "balanced": "custom-saas/qwen3.7-plus",
     "deep": "custom-saas/minimax-MiniMax-M3-cp",
     "vision": "custom-saas/minimax-MiniMax-M3-cp",
-    "coding": "custom-saas/deepseek-deepseek-v4-pro-cp"
+    "coding": "custom-saas/deepseek-v4-flash-saas"
   },
   "notes": {
     "_comment": "All models below live on the custom-saas gateway (cm.beta.hihonor.com/llm-gateway-v3). Declared in opencode.json provider.custom-saas.models.",

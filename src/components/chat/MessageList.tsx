@@ -68,7 +68,7 @@ function StreamingIndicator({ agent, text, tool, onStop }: {
       </div>
       {hasText && (
         <div className="mt-2 ml-10 text-[13px] leading-relaxed text-zinc-700 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
-          {text}
+          <span className="animate-stream-in">{text}</span>
           <span className="inline-block w-1.5 h-3.5 bg-zinc-400 ml-0.5 align-middle animate-pulse" />
         </div>
       )}
@@ -170,6 +170,7 @@ return (
               author={author}
               mentionedAgents={mentionedAgents}
               isGrouped={isGrouped}
+              index={index}
             />
           );
         }}

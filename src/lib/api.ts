@@ -37,6 +37,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  toggleReaction: (roomId: string, messageId: string, emoji: string) =>
+    request<Message>(`/api/rooms/${roomId}/messages/${messageId}/reactions`, {
+      method: "POST",
+      body: JSON.stringify({ emoji }),
+    }),
 
   listTasks: (roomId: string) => request<Task[]>(`/api/rooms/${roomId}/tasks`),
   createTask: (
