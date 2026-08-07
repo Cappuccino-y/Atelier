@@ -15,7 +15,7 @@ import {
   MessageCircleQuestion,
   Diamond,
 } from "lucide-react";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, memo } from "react";
 import { api } from "@/lib/api";
 import type { Message, Agent, Finding, MessageReactions } from "@/types";
 
@@ -458,7 +458,7 @@ function TimelineRow({
   );
 }
 
-export function MessageItem({
+export const MessageItem = memo(function MessageItem({
   message,
   author,
   mentionedAgents = [],
@@ -672,13 +672,14 @@ export function MessageItem({
       </div>
     </div>
   );
-}
+});
 
 const EMOJI_PICKER = ["👍", "🎉", "❤️", "😄", "😢", "🔥"];
 
 function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messageId: string; reactions?: MessageReactions }) {
   const [showPicker, setShowPicker] = useState(false);
   const [localReactions, setLocalReactions] = useState<MessageReactions>(reactions ?? {});
+  useEffect(() => { setLocalReactions(reactions ?? {}); }, [reactions]);
 
   const handleReact = useCallback(async (emoji: string) => {
     setShowPicker(false);
@@ -694,20 +695,13 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
       <div className="mt-1 flex">
         <button
           onClick={() => setShowPicker(true)}
-          className="opacity-0 group-hover:opacity-100 text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded transition-opacity"
+          className="text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded transition-colors"
           title="Add reaction"
         >
           + Reaction
         </button>
-        {showPicker && (
-          <div className="flex gap-1 ml-1">
-            {EMOJI_PICKER.map(e => (
-              <button key={e} onClick={() => handleReact(e)} className="text-sm hover:scale-110 transition-transform">{e}</button>
-            ))}
-          </div>
-        )}
-      </div>
-    );
+</div>
+  );
   }
 
   return (
@@ -724,7 +718,7 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
       ))}
       <button
         onClick={() => setShowPicker(v => !v)}
-        className="text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+        className="text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded transition-colors"
       >
         +
       </button>

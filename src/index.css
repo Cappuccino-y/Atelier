@@ -80,6 +80,13 @@
   --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", monospace;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 @layer base {
   *,
   *::before,
