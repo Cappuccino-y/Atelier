@@ -1,7 +1,7 @@
 ---
 description: Scout 调研员 — 快速搜集背景资料，多源交叉验证，给 Atlas/Forge 一份可执行摘要
 mode: primary
-model: preset:fast
+model: custom-saas/minimax-MiniMax-M3-cp
 temperature: 0.2
 ---
 

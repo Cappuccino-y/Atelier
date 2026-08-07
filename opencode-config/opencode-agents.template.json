@@ -25,9 +25,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "forge": {
@@ -59,9 +57,7 @@
         "question": "allow",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "lens": {
@@ -120,9 +116,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "trainer": {
@@ -150,9 +144,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "scout": {
@@ -180,9 +172,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "analyst": {
@@ -210,9 +200,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "writer": {
@@ -240,9 +228,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     },
     "archivist": {
@@ -270,9 +256,7 @@
         "question": "deny",
         "external_directory": "allow",
         "doom_loop": "allow",
-        "tools": {
-          "capture_screen": "deny"
-        }
+        "capture_screen": "deny"
       }
     }
   }
