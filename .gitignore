@@ -32,6 +32,9 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Per-machine agent model config (deploy creates it)
+server/agent-models.json
+
 # Python (proserpina bridge + agent test artifacts)
 __pycache__/
 *.pyc
