@@ -109,7 +109,7 @@ export function RightPanel({
                   key={t.id}
                   onClick={() => setTab(t.id)}
                   className={cn(
-                    "relative flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium rounded-t-md transition-colors shrink-0",
+                    "relative flex items-center gap-1 px-1.5 py-1.5 text-[11px] font-medium rounded-t-md transition-colors shrink-0",
                     active
                       ? "text-zinc-900"
                       : "text-zinc-500 hover:text-zinc-700"
