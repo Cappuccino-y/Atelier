@@ -28,6 +28,38 @@
         "capture_screen": "deny"
       }
     },
+    "forge": {
+      "description": "Forge 实现者 — 写代码、改文件、跑构建、验证产物",
+      "mode": "primary",
+      "model": "deepseekmanual/deepseek-v4-flash",
+      "prompt": "{file:./agents/forge.md}",
+      "temperature": 0.2,
+      "permission": {
+        "skill": {
+          "*": "deny"
+        },
+        "bash": "allow",
+        "edit": "allow",
+        "write": "allow",
+        "read": {
+          "*": "allow",
+          "*.env": "allow",
+          "*.env.*": "allow"
+        },
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "lsp": "allow",
+        "task": "allow",
+        "todowrite": "allow",
+        "question": "allow",
+        "external_directory": "allow",
+        "doom_loop": "allow",
+        "capture_screen": "deny"
+      }
+    },
     "lens": {
       "description": "Lens 审查 + 视觉验证 — 多模态，读代码找问题 + 启动程序截图看图",
       "mode": "primary",
