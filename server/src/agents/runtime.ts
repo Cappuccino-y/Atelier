@@ -11,6 +11,13 @@ import { parseMemoryEntry } from "./handoff.js";
 
 const HISTORY_LIMIT = 30;
 const OTHER_TRUNCATE = 800;
+// Total character budget for the injected [HISTORY] block. A long
+// multi-round task with full tool outputs (screenshots, file reads) can
+// otherwise balloon past the model's context window — a 39-message chain
+// hit 312KB / 141K tokens, overflowing deepseek-v4-flash and killing the
+// run before it could emit [RESULT]. ~60K chars ≈ 15K tokens keeps the
+// window comfortable while still preserving recent rounds intact.
+const HISTORY_BUDGET = 60_000;
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
@@ -26,17 +33,31 @@ export function loadRoomThread(roomId: string, agentId: string): ChatMessage[] {
     ORDER BY timestamp DESC LIMIT ?
   `).all(roomId, HISTORY_LIMIT) as Row[];
 
-  return rows.reverse().map((m) => {
+  // Walk newest→oldest, keeping own messages whole until the budget is
+  // exhausted; after that even own messages get truncated so the total
+  // injected block can never overflow the model window.
+  const out: ChatMessage[] = [];
+  let budget = HISTORY_BUDGET;
+  for (const m of rows) {
     const isSelf = m.author_id === agentId;
-    return {
+    const stamp = `[${m.author_id} ${new Date(m.timestamp).toLocaleTimeString()}]\n`;
+    const raw = isSelf ? m.content : truncate(m.content, OTHER_TRUNCATE);
+    const size = stamp.length + raw.length;
+    let body = raw;
+    if (size > budget) {
+      // drop enough so this entry fits the remaining budget
+      const keep = Math.max(0, budget - stamp.length);
+      body = keep > 0 ? truncate(raw, keep) : "";
+      if (!body) continue;
+    }
+    budget -= stamp.length + body.length;
+    out.push({
       role: isSelf ? "assistant" : "user",
-      // Own history stays intact so multi-round tasks keep full continuity;
-      // other agents' / the user's messages are capped to save context budget.
-      content: `[${m.author_id} ${new Date(m.timestamp).toLocaleTimeString()}]\n${
-        isSelf ? m.content : truncate(m.content, OTHER_TRUNCATE)
-      }`,
-    };
-  });
+      content: stamp + body,
+    });
+    if (budget <= 0) break;
+  }
+  return out.reverse();
 }
 
 /**
