@@ -73,7 +73,7 @@ export const config = {
    * Backed by OPENCODE_MODEL env var for backwards compatibility.
    */
   opencodeModel: _envOpencodeModel,
-  opencodeTimeout: parseInt(process.env.OPENCODE_TIMEOUT ?? "600000", 10),
+  opencodeTimeout: parseInt(process.env.OPENCODE_TIMEOUT ?? "21600000", 10),
   opencodeHandoffDepth: parseInt(process.env.OPENCODE_HANDOFF_DEPTH ?? "50", 10),
   agentMapping: parseMapping(process.env.AGENT_MAPPING ?? "atlas:atlas,forge:build,lens:lens,echo:echo,trainer:trainer,scout:scout,analyst:analyst,writer:writer,archivist:archivist"),
   proserpinaUrl: process.env.PROSERPINA_URL ?? "http://127.0.0.1:8765",
