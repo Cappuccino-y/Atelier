@@ -147,6 +147,19 @@ const IMPLICIT_RULES: ImplicitRule[] = [
 
   // -- Lens output --
   {
+    name: "lens_review_writer_rework",
+    match: ({ from, tags, content }) =>
+      from === "lens"
+      && tags.includes("REVIEW")
+      && ["critical", "major"].includes(detectReviewSeverity(content))
+      && /文档|doc|考点|章节|标题|大纲|目录/i.test(content),
+    targets: ({ content }) => [{
+      agentId: "writer",
+      requiredOutputSchema: "document",
+      reason: `Lens 标 ${detectReviewSeverity(content)} → 派 Writer 修订文档`,
+    }],
+  },
+  {
     name: "lens_review_rework",
     match: ({ from, tags, content }) =>
       from === "lens"
