@@ -50,7 +50,7 @@ v1 会被 server 解析时自动补全 schemaVersion=1.0 + 默认 traceId + 默�
 - **串行必须单目标**：需要"先 A 再 B"时，to **只填 A**；A 完成后由 A 自行 handoff 派 B（单跳接力）。不要一次填多个表达先后关系 — server 会把多目标全部**并行**执行，顺序意图会丢失
 - **taskSummary** ≤ 2000 字符（旧 task 字段被 taskSummary 取代）
 - **requiredOutputSchema** 决定下游 agent 该输出哪种 tag（强烈建议填）
-- **failurePolicy.onInvalidOutput** 默认 retry（重试一次）— 输出不匹配 schema 时 server 重试该 agent，重试仍失败则 escalate 到用户（[BLOCKER]）
+- **failurePolicy.onInvalidOutput** 默认 escalate → 输出不匹配 schema 时路由回 Atlas，让编排者决定下一步
 - **traceId** 由 server 自动生成（agent 输出里写什么都行，最终以 server 端为准）
 - 派活给自己（self-mention）会被代码自动丢弃
 

@@ -303,7 +303,7 @@ function buildImplicitDirectives(
       taskSummary,
       requiredOutputSchema: schema,
       failurePolicy: {
-        onInvalidOutput: "retry",
+        onInvalidOutput: "escalate",
         onTimeout: "fallback_echo",
         maxRetries: 1,
       },
@@ -503,23 +503,34 @@ async function invokeAgentAsync(opts: {
               });
             })();
           } else {
-            // Backoff budget or retries exhausted → escalate to user.
-            sendAll("system.warning", {
+            // Backoff budget or retries exhausted → route to Atlas so the
+            // orchestrator can decide the next step (re-pick, adjust, or
+            // tell the user) instead of dead-ending or bothering Echo.
+            sendAll("system.info", {
               roomId: opts.roomId,
-              reason: "schema-escalate",
+              reason: "route-to-atlas",
               agentId: opts.agentId,
               traceId: opts.handoff?.traceId,
               detail: decision.reason,
             });
           }
-        } else {
+        } else if (failurePolicy.onInvalidOutput === "escalate") {
           // failurePolicy.onInvalidOutput = "escalate" → emit [BLOCKER]
-          // so the user sees that the chain gave up.
           sendAll("system.warning", {
             roomId: opts.roomId,
             reason: "schema-escalate",
             agentId: opts.agentId,
             traceId: opts.handoff?.traceId,
+          });
+        } else {
+          // Default (retry exhausted or unknown action) → route to Atlas
+          // so the orchestrator decides what to do next.
+          sendAll("system.info", {
+            roomId: opts.roomId,
+            reason: "route-to-atlas",
+            agentId: opts.agentId,
+            traceId: opts.handoff?.traceId,
+            detail: `schema-mismatch on "${requiredSchema}" — routing to Atlas`,
           });
         }
       }
@@ -591,8 +602,8 @@ async function invokeAgentAsync(opts: {
       //   3. Else (validation passed, no handoff block) evaluate implicit
       //      tag-based rules (Phase 2), grouped per requiredOutputSchema so
       //      each fanned-out receiver is validated against ITS schema.
-      //   4. On validation failure with retry/escalate, NOTHING routes — the
-      //      invalid output is terminal for this hop (retry handles it).
+      //   4. On validation failure WITHOUT fallback_echo → route to Atlas so
+      //      the orchestrator decides the next step (re-pick, adjust, etc.).
       const nextDirectives: HandoffDirectiveV2[] = [];
       if (echoFallback) {
         nextDirectives.push(echoFallback);
@@ -601,6 +612,21 @@ async function invokeAgentAsync(opts: {
           nextDirectives.push(emittedHandoff);
         } else {
           nextDirectives.push(...buildImplicitDirectives(opts.roomId, result.content, tags, opts.agentId, id));
+        }
+      } else if (validationFailed && !echoFallback) {
+        // Route to Atlas with failure context so it can re-pick/adjust.
+        const atlas = getAgentByName("atlas");
+        if (atlas) {
+          nextDirectives.push({
+            schemaVersion: "2.0",
+            traceId: opts.handoff?.traceId ?? `fail_${Date.now().toString(36)}`,
+            rawTraceId: "",
+            to: [{ id: atlas.id, name: atlas.name, rawName: "atlas" }],
+            taskSummary: `上一步 agent "${opts.agentId}" 输出未通过 schema 校验（期望 ${requiredSchema}），请评估后决定下一步：换人、调整任务描述、或告知用户`,
+            requiredOutputSchema: "decision_block",
+            failurePolicy: { onInvalidOutput: "escalate" as const, onTimeout: "fallback_echo" as const, maxRetries: 0 },
+            provenance: { parentAgent: opts.agentId, parentMessageId: id },
+          });
         }
       }
 

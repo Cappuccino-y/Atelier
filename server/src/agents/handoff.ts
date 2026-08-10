@@ -104,7 +104,7 @@ export const HandoffPayloadV2_1Schema = z.object({
   }).optional(),
   evidenceStandard: EvidenceStandardEnum.optional(),
   failurePolicy: z.object({
-    onInvalidOutput: FailureActionEnum.default("retry"),
+    onInvalidOutput: FailureActionEnum.default("escalate"),
     onTimeout: FailureActionEnum.default("fallback_echo"),
     maxRetries: z.number().int().min(0).max(3).default(1),
   }).optional(),
@@ -237,7 +237,7 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
     rawTraceId: "",   // v1 blocks carry no traceId — nothing to preserve
     to: resolved,
     taskSummary: v1.data.task ?? "",
-    failurePolicy: { onInvalidOutput: "retry", onTimeout: "fallback_echo", maxRetries: 1 },
+    failurePolicy: { onInvalidOutput: "escalate", onTimeout: "fallback_echo", maxRetries: 1 },
   };
 }
 
@@ -252,7 +252,7 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
     }
   }
   if (resolved.length === 0) return null;
-  const fp = payload.failurePolicy ?? { onInvalidOutput: "fallback_echo" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };
+  const fp = payload.failurePolicy ?? { onInvalidOutput: "escalate" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };
   return {
     schemaVersion: payload.schemaVersion,
     traceId: payload.traceId ?? nanoid(),
