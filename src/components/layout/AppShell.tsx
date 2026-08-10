@@ -7,10 +7,9 @@ import { MessageList } from "@/components/chat/MessageList";
 import { Composer } from "@/components/chat/Composer";
 import { RoomHeader } from "@/components/chat/RoomHeader";
 import type {
-  Agent, Message, Room, Project, Task, Finding, Event, ActivityEvent,
+  Agent, Message, Room, Project, Task, Event, ActivityEvent, MemoryEntry,
 } from "@/types";
 import type { WsStatus } from "@/lib/ws";
-import { cn } from "@/lib/utils";
 
 type Props = {
   rooms: Room[];
@@ -43,6 +42,10 @@ type Props = {
   onStopStreaming: () => void;
   onStopAll: () => void;
   onToggleRightPanel: () => void;
+  onCreateProject: (name: string) => void;
+  onDeleteProject: (id: string, name: string) => void;
+  onMoveRoom: (roomId: string, projectId: string | null) => void;
+  memoryEntries: MemoryEntry[];
 };
 
 export function AppShell(props: Props) {
@@ -73,7 +76,6 @@ export function AppShell(props: Props) {
   }, [props]);
 
   const allMessages = props.messages;
-  const flatFindings: Finding[] = useMemoFlatFindings(allMessages);
 
   const activeAgentIds = useMemo(() => {
     if (!props.currentRoom) return [];
@@ -117,6 +119,10 @@ export function AppShell(props: Props) {
           currentRoomId={props.currentRoom?.id}
           onSelectRoom={props.onSelectRoom}
           onCreateRoom={props.onCreateRoom}
+          onDeleteRoom={props.onDeleteRoom}
+          onCreateProject={props.onCreateProject}
+          onDeleteProject={props.onDeleteProject}
+          onMoveRoom={props.onMoveRoom}
         />
         <main className="flex-1 flex flex-col min-w-0">
           {props.currentRoom ? (
@@ -153,16 +159,9 @@ export function AppShell(props: Props) {
         {props.showRightPanel && props.currentRoom && (
           <RightPanel
             room={props.currentRoom}
-            tasks={props.tasks}
-            messages={allMessages}
-            findings={flatFindings}
-            events={props.events}
             activities={props.activities}
             agents={props.agents}
-            onCreateTask={props.onCreateTask}
-            onUpdateTask={props.onUpdateTask}
-            onDeleteTask={props.onDeleteTask}
-            onSaveNotes={props.onSaveNotes}
+            memoryEntries={props.memoryEntries}
             onStopAll={props.onStopAll}
           />
         )}
@@ -184,12 +183,4 @@ export function AppShell(props: Props) {
       />
     </div>
   );
-}
-
-function useMemoFlatFindings(messages: Message[]): Finding[] {
-  const out: Finding[] = [];
-  for (const m of messages) {
-    if (m.findings) out.push(...m.findings);
-  }
-  return out;
 }

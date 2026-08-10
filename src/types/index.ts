@@ -97,6 +97,19 @@ export type Event = {
   timestamp: number;
 };
 
+export type MemoryEntry = {
+  memoryId: string;
+  scope: string;
+  timestamp: number;
+  category: string;
+  title: string;
+  tags: string[];
+  confidence: number;
+  source: string;
+  content: string;
+  contentTruncated: boolean;
+};
+
 export type AgentStatus = "online" | "offline" | "busy" | "idle";
 
 export type ServerEvent =

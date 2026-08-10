@@ -20,11 +20,8 @@ export async function routes(app: FastifyInstance) {
     if (!name) return reply.code(400).send({ error: "name required" });
     const id = nanoid();
     const now = Date.now();
-    db.prepare(`INSERT INTO rooms (id, name, topic, status, unread, last_activity, agent_ids, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)`)
-      .run(id, name, topic ?? "", "active", now, JSON.stringify(["atlas","forge","lens","echo"]), now);
-    if (projectId) {
-      db.prepare("UPDATE rooms SET project_id = ? WHERE id = ?").run(projectId, id);
-    }
+    db.prepare(`INSERT INTO rooms (id, name, topic, status, unread, last_activity, agent_ids, created_at, project_id) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`)
+      .run(id, name, topic ?? "", "active", now, JSON.stringify(["atlas","forge","lens","echo"]), now, projectId ?? null);
     const row = db.prepare("SELECT * FROM rooms WHERE id = ?").get(id) as any;
     sendAll("room.created", normalizeRoom(row));
     return normalizeRoom(row);
@@ -38,6 +35,7 @@ export async function routes(app: FastifyInstance) {
       if (k in body) { fields.push(`${k} = ?`); vals.push(body[k]); }
     }
     if ("agentIds" in body) { fields.push("agent_ids = ?"); vals.push(JSON.stringify(body.agentIds)); }
+    if ("projectId" in body) { fields.push("project_id = ?"); vals.push(body.projectId ?? null); }
     if (fields.length === 0) return reply.code(400).send({ error: "no fields" });
     vals.push(req.params.id);
     db.prepare(`UPDATE rooms SET ${fields.join(", ")} WHERE id = ?`).run(...vals);
@@ -61,9 +59,50 @@ export async function routes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  app.get<{ Params: { id: string } }>("/api/rooms/:id/activities", async (req, reply) => {
+    const rows = db.prepare(
+      "SELECT * FROM activities WHERE room_id = ? ORDER BY timestamp DESC LIMIT 100"
+    ).all(req.params.id) as any[];
+    return rows.map(a => ({
+      id: a.id,
+      roomId: a.room_id,
+      kind: a.kind,
+      agentId: a.agent_id,
+      message: a.message,
+      meta: JSON.parse(a.meta || "{}"),
+      timestamp: a.timestamp,
+    }));
+  });
+
   app.get("/api/projects", async () => {
     const rows = db.prepare("SELECT * FROM projects ORDER BY created_at").all() as any[];
     return rows.map(p => ({ ...p, roomIds: JSON.parse(p.room_ids || "[]") }));
+  });
+
+  app.post<{ Body: { name: string } }>("/api/projects", async (req, reply) => {
+    const { name } = req.body;
+    if (!name) return reply.code(400).send({ error: "name required" });
+    const id = nanoid();
+    const now = Date.now();
+    db.prepare("INSERT INTO projects (id, name, room_ids, created_at) VALUES (?, ?, '[]', ?)").run(id, name, now);
+    const row = db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as any;
+    const project = { ...row, roomIds: JSON.parse(row.room_ids || "[]") };
+    sendAll("project.updated", project);
+    return project;
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/projects/:id", async (req, reply) => {
+    const rooms = db.prepare("SELECT id FROM rooms WHERE project_id = ?").all(req.params.id) as Array<{ id: string }>;
+    for (const room of rooms) {
+      db.prepare("DELETE FROM messages WHERE room_id = ?").run(room.id);
+      db.prepare("DELETE FROM tasks WHERE room_id = ?").run(room.id);
+      db.prepare("DELETE FROM events WHERE room_id = ?").run(room.id);
+      db.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
+      sendAll("room.deleted", { id: room.id });
+    }
+    db.prepare("DELETE FROM projects WHERE id = ?").run(req.params.id);
+    sendAll("project.updated", { id: req.params.id, deleted: true });
+    return { ok: true };
   });
 }
 

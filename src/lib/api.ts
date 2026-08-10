@@ -1,4 +1,4 @@
-import type { Agent, Message, Room, Task, Project, Event, Finding } from "@/types";
+import type { Agent, Message, Room, Task, Project, Event, Finding, MemoryEntry, ActivityEvent } from "@/types";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || "http://127.0.0.1:8787";
 
@@ -30,6 +30,11 @@ export const api = {
   clearRoomMessages: (id: string) =>
     request<{ ok: true }>(`/api/rooms/${id}/clear`, { method: "POST" }),
   listProjects: () => request<Project[]>("/api/projects"),
+  createProject: (name: string) =>
+    request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),
+  deleteProject: (id: string) => request<{ ok: true }>(`/api/projects/${id}`, { method: "DELETE" }),
+  moveRoom: (roomId: string, projectId: string | null) =>
+    request<Room>(`/api/rooms/${roomId}`, { method: "PATCH", body: JSON.stringify({ projectId }) }),
 
   listMessages: (roomId: string) => request<Message[]>(`/api/rooms/${roomId}/messages`),
   sendMessage: (roomId: string, body: { content: string; authorId?: string }) =>
@@ -67,6 +72,10 @@ export const api = {
 
   listRoomEvents: (roomId: string) => request<Event[]>(`/api/rooms/${roomId}/events`),
   listEvents: () => request<Event[]>("/api/events"),
+  listRoomActivities: (roomId: string) =>
+    request<ActivityEvent[]>(`/api/rooms/${roomId}/activities`),
+  listRoomMemory: (roomId: string) =>
+    request<{ count: number; entries: MemoryEntry[] }>(`/api/memory/list?scope=room:${roomId}`),
 
   reviewHealth: () => request<{ status: string }>("/api/review/health"),
   requestReview: (body: { document: string; panel?: string; context?: string }) =>

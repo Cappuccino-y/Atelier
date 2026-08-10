@@ -1,4 +1,4 @@
-import { Search, Bell, MoreHorizontal, Sparkles } from "lucide-react";
+import { Search, Sparkles } from "lucide-react";
 import type { WsStatus } from "@/lib/ws";
 import type { Agent } from "@/types";
 import { cn } from "@/lib/utils";
@@ -157,41 +157,20 @@ export function TopBar({
         </TooltipProvider>
       )}
 
-      {/* Command palette trigger (Linear-style) */}
+      {/* Command palette trigger */}
       <button
         type="button"
         onClick={onOpenPalette}
-        className="group flex h-7 w-[260px] items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className="group flex h-7 w-[140px] items-center gap-2 rounded-md border border-border bg-muted/40 px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         aria-label="Open command palette"
       >
         <Search className="h-3.5 w-3.5 shrink-0" />
         <span className="flex-1 truncate text-left">
-          Search or run a command…
+          Search…
         </span>
         <kbd className="hidden shrink-0 rounded border border-border bg-background px-1.5 py-[1px] font-mono text-[10px] font-medium text-muted-foreground shadow-[0_1px_0_rgba(0,0,0,0.04)] sm:inline-block">
           ⌘K
         </kbd>
-      </button>
-
-      {/* Notification bell */}
-      <button
-        type="button"
-        className="relative flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        aria-label={unread > 0 ? `${unread} unread notifications` : "Notifications"}
-      >
-        <Bell className="h-4 w-4" />
-        {unread > 0 && (
-          <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-red-500 ring-2 ring-background" />
-        )}
-      </button>
-
-      {/* Overflow menu */}
-      <button
-        type="button"
-        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        aria-label="More options"
-      >
-        <MoreHorizontal className="h-4 w-4" />
       </button>
     </div>
   );

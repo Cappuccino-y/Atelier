@@ -74,15 +74,27 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS activities (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    agent_id TEXT,
+    message TEXT,
+    meta TEXT NOT NULL DEFAULT '{}',
+    timestamp INTEGER NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, timestamp);
   CREATE INDEX IF NOT EXISTS idx_events_room ON events(room_id, timestamp);
   CREATE INDEX IF NOT EXISTS idx_tasks_room ON tasks(room_id);
+  CREATE INDEX IF NOT EXISTS idx_activities_room ON activities(room_id, timestamp DESC);
 `);
 
 // Additive migrations — older DB files predated these columns and CREATE
 // TABLE IF NOT EXISTS won't add them. Try/catch so already-migrated DBs
 // don't blow up on startup.
 try { db.exec("ALTER TABLE messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '{}'"); } catch {}
+try { db.exec("ALTER TABLE rooms ADD COLUMN project_id TEXT"); } catch {}
 
 type CountRow = { count: number };
 

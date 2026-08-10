@@ -327,7 +327,7 @@ export function CommandBar(props: Props) {
   return (
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent
-        className="max-w-2xl p-0 gap-0 overflow-hidden"
+        className="!max-w-xs p-0 gap-0 overflow-hidden [&>button.absolute]:hidden"
         onKeyDown={handleKey}
       >
         <DialogTitle className="sr-only">Command Bar</DialogTitle>
@@ -338,12 +338,9 @@ export function CommandBar(props: Props) {
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search or run a command…"
-            className="h-12 border-0 shadow-none px-0 text-[15px] bg-transparent"
+            placeholder="Search…"
+            className="h-12 border-0 shadow-none px-0 text-[15px] bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0"
           />
-          <kbd className="hidden sm:inline-flex items-center rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 font-mono">
-            ⌘K
-          </kbd>
         </div>
 
         <div className="flex items-center gap-1 px-3 py-2 border-b">

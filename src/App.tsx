@@ -9,7 +9,7 @@ import { api } from "@/lib/api";
 import { ws } from "@/lib/ws";
 import { atchDebug } from "@/lib/atch-debug";
 import type {
-  Agent, Message, Room, Project, Task, Finding, Event, ServerEvent, ActivityEvent, ActivityKind,
+  Agent, Message, Room, Project, Task, Finding, Event, ServerEvent, ActivityEvent, ActivityKind, MemoryEntry,
 } from "@/types";
 import type { WsStatus } from "@/lib/ws";
 import { Toaster, toast } from "@/components/ui/toast-stub";
@@ -90,6 +90,7 @@ export default function App() {
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [confirm, setConfirm] = useState<{ title: string; description?: string; destructive?: boolean; onConfirm: () => void } | null>(null);
   const [reviewResult, setReviewResult] = useState<{ findings: Finding[]; summary: string } | null>(null);
+  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
 
   const currentRoom = useMemo(() => rooms.find(r => r.id === currentRoomId), [rooms, currentRoomId]);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
@@ -173,6 +174,23 @@ export default function App() {
       } catch (err) {
         atchDebug.warn("app", "room load failed", { roomId: currentRoomId, error: String(err) });
       }
+      // fetch memory separately (can be slow)
+      try {
+        const mem = await api.listRoomMemory(currentRoomId);
+        if (!cancelled) setMemoryEntries(mem.entries);
+      } catch { /* memory may not be enabled */ }
+      // fetch past activities for Live/Tools tab
+      try {
+        const acts = await api.listRoomActivities(currentRoomId);
+        if (!cancelled) {
+          setActivities(curr => {
+            // merge: keep live events from OTHER rooms, replace current room's with server data
+            const others = curr.filter(a => a.roomId !== currentRoomId);
+            // server data is newest-first, reverse to match pushActivity (newest last for chrono sort)
+            return [...others, ...acts.reverse()];
+          });
+        }
+      } catch { /* no persisted activities */ }
     })();
     return () => { cancelled = true; };
   }, [currentRoomId]);
@@ -384,6 +402,18 @@ export default function App() {
           else if (event === "system.error") toast.error(p.error ?? "error", p);
           break;
         }
+        case "project.updated": {
+          const p = payload as Project & { deleted?: boolean };
+          if (p.deleted) {
+            setProjects(curr => curr.filter(x => x.id !== p.id));
+          } else {
+            setProjects(curr => {
+              const exists = curr.some(x => x.id === p.id);
+              return exists ? curr.map(x => x.id === p.id ? p : x) : [...curr, p];
+            });
+          }
+          break;
+        }
         case "self_talk.start":
         case "self_talk.stop":
         case "escalation":
@@ -449,6 +479,34 @@ export default function App() {
       },
     });
   }, [currentRoomId]);
+
+  const handleCreateProject = useCallback(async (name: string) => {
+    try {
+      await api.createProject(name);
+    } catch (err) {
+      toast.error("Failed to create project", { detail: String(err) });
+    }
+  }, []);
+
+  const handleDeleteProject = useCallback((id: string, name: string) => {
+    setConfirm({
+      title: `Delete group "${name}"?`,
+      description: "All rooms in this group and their data will be permanently deleted.",
+      destructive: true,
+      onConfirm: async () => {
+        await api.deleteProject(id);
+      },
+    });
+  }, []);
+
+  const handleMoveRoom = useCallback(async (roomId: string, projectId: string | null) => {
+    try {
+      const updated = await api.moveRoom(roomId, projectId);
+      setRooms(curr => curr.map(r => r.id === updated.id ? updated : r));
+    } catch (err) {
+      toast.error("Failed to move room", { detail: String(err) });
+    }
+  }, []);
 
   const handleSaveRoom = useCallback(async (patch: Partial<Room>) => {
     if (!currentRoomId) return;
@@ -615,6 +673,10 @@ export default function App() {
         onStopStreaming={handleStopStreaming}
         onStopAll={handleStopAll}
         onToggleRightPanel={handleToggleRightPanel}
+        onCreateProject={handleCreateProject}
+        onDeleteProject={handleDeleteProject}
+        onMoveRoom={handleMoveRoom}
+        memoryEntries={memoryEntries}
       />
 
       <CreateRoomDialog open={createOpen} onClose={() => setCreateOpen(false)} projects={projects} onCreate={handleCreateRoom} />
