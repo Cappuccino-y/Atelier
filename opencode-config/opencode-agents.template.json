@@ -204,7 +204,7 @@
       }
     },
     "writer": {
-      "description": "Writer 写作者 — 把事实/分析润色成可发布文档",
+      "description": "Writer 写作者 — 把事实/分析润色成可发布文档，可写文件",
       "mode": "primary",
       "model": "minimax2/MiniMax-M3",
       "prompt": "{file:./agents/writer.md}",
@@ -213,10 +213,14 @@
         "skill": {
           "*": "deny"
         },
-        "bash": "deny",
-        "edit": "deny",
-        "write": "deny",
-        "read": "allow",
+        "bash": "allow",
+        "edit": "allow",
+        "write": "allow",
+        "read": {
+          "*": "allow",
+          "*.env": "allow",
+          "*.env.*": "allow"
+        },
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
