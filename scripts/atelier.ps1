@@ -99,11 +99,38 @@ function Stop-AtelierPorts {
 
 function Start-Svc([string]$Name, [string]$Cwd, [string]$Cmd, [string[]]$CmdArgs) {
   $logPath = Join-Path $LogsDir "$Name.log"
+  $logErrPath = "$logPath.err"
+  $q = [char]34
+
+  # Inner command (sent to cmd /c): force UTF-8 console code page so Chinese
+  # in stdout/stderr is readable, then redirect each stream to its own
+  # file. Split stderr from stdout so a crash's red text is easy to find
+  # without scrolling through hundreds of access-log lines.
   $argStr = $Cmd + " " + ($CmdArgs -join ' ')
-  $fullCmd = "$argStr > `"$logPath`" 2>&1"
+  $innerCmd = "chcp 65001 >nul & $argStr > $logPath 2> $logErrPath"
+
+  # Detach the spawn chain from this PowerShell process tree by wrapping
+  # it in cmd's `start /B`. Without this, [void]Process::Start() makes the
+  # grandchild's parent be ps1 — when PowerShell host exits (terminal
+  # close, ISE restart, session disconnect) Windows reaps the entire
+  # subtree, the grandchild's inherited stdin handle gets EPIPE, and
+  # node silently exits with NO stderr record (observed on vite/tsx/
+  # uvicorn). The `start /B` cmd builtin reparents the child to the
+  # session root instead.
+  #
+  # cmd start syntax:
+  #   start "<title>" /B /D "<dir>" cmd.exe /c "<inner>"
+  # The empty title argument ("") is required (cmd parses first quoted
+  # token as title-or-path). Order matters: /B must precede /D per cmd.
+  $startCmd = "start $q$q /D $q$Cwd$q /B cmd.exe /c $q$innerCmd$q"
+
+  # Outer command we hand to Process::Start. PS 5.1 doesn't support
+  # .NET ArgumentList (that's .NET Core 2.1+), so we go through .Arguments
+  # with the double-quote escape \`" which PowerShell's own parser
+  # already understands inside a "..." string.
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = "cmd.exe"
-  $psi.Arguments = "/d /s /c `"$fullCmd`""
+  $psi.Arguments = "/d /s /c `"$startCmd`""
   $psi.WorkingDirectory = $Cwd
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
