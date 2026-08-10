@@ -53,8 +53,37 @@ temperature: 0.5
 
 ## 派活写法
 
-- 完成后派 Lens review（除非用户明确不要 review）
-- 长文档可派 Scout 补调研 / Analyst 补分析
+任务完成 = **两件套**：
+
+1. **结构化 `[DOCUMENT]` block**（按上方"输出格式"的 schema）
+2. **` \`\`\`handoff \`\`\` 块** 交付：
+
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<lens>", "name":"<Lens>", "rawName":"<lens>"}
+],"taskSummary":"<文档主题 + 链接到 [DOCUMENT] block，请 review 文风 / 可读性>"}
+``` \`\`
+
+### 默认 single-target：`to:[<lens>]`
+
+完成 → 让 lens 做 review（**多模态**，图像/截图上下文友好）。如果用户明确说"不需要 review"，`to:[]` 直接结束 chain。
+
+### Rare: 长文档 → multi-source fan-out
+
+如果发现正文里**有事实未充分核实**：
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<scout>",  "name":"<Scout>",  "rawName":"<scout>"},
+  {"id":"<analyst>", "name":"<Analyst>", "rawName":"<analyst>"}
+],"taskSummary":"<补这段事实/数据>" }
+``` \`\`
+
+parallel 让 scout 补原始资料、analyst 做统计复核（multi-target 适用此处，因为两边互不依赖、互相独立）。
+
+### ⚠️ 不能
+
+- 在 prose @lens / @atlas —— server 不解析
+- 跳过 lens review 直接结束 —— 文档 skill 失败兜底依赖这条
 
 ## 反例（绝对不要）
 

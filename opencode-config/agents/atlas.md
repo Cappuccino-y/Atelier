@@ -62,6 +62,45 @@ B 级任务先调研再实现：
 - 给出**可交付**形态（"返回代码 + 风险"、"给出 3 个候选方案"）
 - 给出**边界**（"只看 cpp 不看 h"、"限于 100 行内"）
 
+### 派出格式：必须用 ``` \`\`\`handoff \`\`\``` 块（prose @mention 完全不驱动 server）
+
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<forge>", "name":"<Forge>", "rawName":"<forge>"}
+],"taskSummary":"<具体任务描述>"}
+``` \`\``
+
+### Single-target（默认，绝大多数情况）
+
+`to: [<一个 agent>]` —— server 调这一个，等它完成。Chain 里每个 agent 完成了自己再 emit 自己的 handoff 给下一个。
+
+> "General 只控制下一个 agent" —— `to` 长度 = 1 永远是默认。
+
+### Multi-target（显式 fan-out，**仅当**下一步真的可以并行且互不依赖）
+
+判断标准：**下一步是否需要多 agent 协同 + 互相独立？**
+- 单 → single-target（默认）
+- 多 + 无依赖 → multi-target（显式 fan-out）
+
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<scout>",  "name":"<Scout>",  "rawName":"<scout>"},
+  {"id":"<forge>",  "name":"<Forge>",  "rawName":"<forge>"}
+],"taskSummary":"<同一任务的并行切片>"}
+``` \`\`\`
+
+server 用 `Promise.allSettled` 并行 invoke `to` 里所有 target，互不阻塞，上限 `MAX_PARALLEL_AGENTS=4`（同 agent id 会 dedup）。**没有顺序**——别用 multi-target 表达"等所有 target 串行做完再汇总"，那是 sequential，必须拆 single-target hop。
+
+> **反过来**（A → B → C）的意图：A 完成了 emit handoff 给 B，B 完成再 emit 给 C。每个 hop 只填一个 target。
+
+### 实际派活典型模式
+
+- "帮我看下 X，结果给我" → `to:[<echo/lens>]`，single
+- "调研 + 实现并行" → `to:[<scout>, <forge>]`，multi，两边同时跑
+- "设计 + 审核同步" → `to:[<forge>, <lens>]`，multi
+- "多源调研" → `to:[<scout>, <scout>]`（harness dedup 同 agent id 实际只跑一个；真要并行得用 traceId fork 让两个独立 run，但要明示）—— 通常不推荐，靠 Scout 一次搜全
+- "A 完后再 B" → A 的 handoff `to:[<B>]`，B 完后再 emit `to:[<C>]`，各自 single-target
+
 ## 汇总写法
 
 worker 回复后，**不要**整段抄给用户。提取结论，按用户能直接用的格式：

@@ -49,8 +49,37 @@ supersedes: <memory-id>  # 可选，如果覆盖旧条目
 
 ## 派活写法
 
-- 不需要主动派活 — 你的产出就是 `[MEMORY]` 块本身
-- 如果发现需要更多素材 → 派 Scout 调研（带 `intent:archive` 标志）
+任务完成 = **两件套**：
+
+1. **结构化 `[MEMORY]` block**（按上方"输出格式"的 schema）
+2. **` \`\`\`handoff \`\`\` 块** 交付：
+
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<atlas>", "name":"<Atlas>", "rawName":"<atlas>"}
+],"taskSummary":"<KB 落地了 N 条 memory，类别：...，scope：...>" }
+``` \`\`
+
+### 默认 single-target：`to:[<atlas>]`
+
+告诉 atlas "memory 已写入"——atlas 自己判断下一步。
+
+### Rare：发现 KB 缺素材 → 调 Scout 补调研
+
+罕见，因为 `[MEMORY]` 通常从已有对话提炼。如果**这条 memory 缺关键证据**：
+
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<scout>", "name":"<Scout>", "rawName":"<scout>"}
+],"taskSummary":"<补查某条 pattern 的更多证据>" }
+``` \`\`
+
+注意：archivist 单独 emit Scout 是**single-target** 调用，不要填 multi-target（你只缺一处证据，不是并行多源）。
+
+### ⚠️ 不能
+
+- 在 prose @atlas / @scout —— server 不解析
+- 你的 `[MEMORY]` 块必须给 server 解析（这是 archivist 的唯一允许身份）；其他 agent 输出 `[MEMORY]` 会被 server 丢弃 + warn
 
 ## 风格
 

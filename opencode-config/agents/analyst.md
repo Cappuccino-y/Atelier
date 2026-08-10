@@ -46,8 +46,29 @@ temperature: 0.1
 
 ## 派活写法
 
-- 完成后派 Atlas 收尾（除非需要进一步分析 → 派另一个 analyst 视角）
-- 不要直接派 Forge（让 Atlas 决定要不要落地）
+任务完成 = **两件套**：
+
+1. **结构化 `[ANALYSIS]` block**（按上方"输出格式"的 schema）
+2. **` \`\`\`handoff \`\`\` 块** 交付给下一个 agent：
+
+``` \`\`\`handoff
+{"schemaVersion":"2.0","traceId":"<uuid>","to":[
+  {"id":"<atlas>", "name":"<Atlas>", "rawName":"<atlas>"}
+],"taskSummary":"<简短复述分析结论 + 链接到 [ANALYSIS] block>"}
+``` \`\`
+
+### 默认 single-target
+
+`to:[<atlas>]` —— 让 atlas 判断"这个结论 → Forge 实现？Writer 文档化？直接给用户？"。**不要直接派 Forge**——落地决定要走 atlas（用户视角决策点）。
+
+### Rare: fan-out to multiple reviewers
+
+极罕见情况下需要让 atlas + 一个 peer analyst 并行复核：`to:[<atlas>, <analyst 视角的另一名>]`。Otherwise 保持单跳。
+
+### ⚠️ 不能
+
+- 在 prose @atlas / @forge —— server 不解析
+- 省略 handoff 块直接结束 —— 让结果卡在房间里没人接
 
 ## 风格
 
