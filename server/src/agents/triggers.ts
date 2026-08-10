@@ -11,12 +11,7 @@ import {
   type AgentLocator,
   type OutputSchema,
 } from "./handoff.js";
-import {
-  evaluateImplicitRules,
-  buildEchoFallback,
-  type TagKind,
-  type ImplicitTarget,
-} from "./implicit-handoff.js";
+import { buildEchoFallback } from "./implicit-handoff.js";
 import { decideRetry, sleep } from "./retry.js";
 import { nanoid } from "nanoid";
 
@@ -254,77 +249,6 @@ function chainDepth(parentMessageId: string | undefined): number {
     current = row.parent_id;
   }
   return depth;
-}
-
-/**
- * Build synthetic handoff v2 directives from the implicit tag-based rules
- * that fired for an agent's output. Targets are grouped by
- * requiredOutputSchema so each fanned-out receiver is validated against the
- * schema IT was asked to produce (a single shared schema would force every
- * receiver to emit the first rule's tag). Returns [] when no rule fired or
- * nothing resolved to a known agent.
- */
-function buildImplicitDirectives(
-  roomId: string,
-  content: string,
-  tags: string[],
-  fromAgentId: string,
-  parentMessageId: string,
-): HandoffDirectiveV2[] {
-  const tagKinds = tags as TagKind[];
-  const implicit = evaluateImplicitRules({ from: fromAgentId.toLowerCase(), tags: tagKinds, content });
-  if (implicit.length === 0) return [];
-
-  const fakeLocator: AgentLocator = (raw: string) => {
-    const a = getAgentByName(raw);
-    return a ? { id: a.id, name: a.name } : null;
-  };
-
-  const groups = new Map<OutputSchema, ImplicitTarget[]>();
-  for (const t of implicit) {
-    const arr = groups.get(t.requiredOutputSchema) ?? [];
-    arr.push(t);
-    groups.set(t.requiredOutputSchema, arr);
-  }
-
-  const directives: HandoffDirectiveV2[] = [];
-  for (const [schema, targets] of groups) {
-    const resolved = targets
-      .map((t) => fakeLocator(t.agentId))
-      .filter((a): a is { id: string; name: string } => a !== null);
-    if (resolved.length === 0) continue;
-    const traceId = `imp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const taskSummary = targets.map((t) => `[${t.agentId}] ${t.reason}`).join("; ");
-    directives.push({
-      schemaVersion: "2.0",
-      traceId,
-      rawTraceId: traceId,
-      to: resolved.map((a) => ({ id: a.id, name: a.name, rawName: a.id })),
-      taskSummary,
-      requiredOutputSchema: schema,
-      failurePolicy: {
-        onInvalidOutput: "escalate",
-        onTimeout: "fallback_echo",
-        maxRetries: 1,
-      },
-      provenance: {
-        parentAgent: fromAgentId,
-        parentMessageId,
-      },
-    });
-  }
-
-  if (directives.length > 0) {
-    // Broadcast which implicit rules fired for observability.
-    sendAll("system.info", {
-      roomId,
-      reason: "implicit-handoff",
-      from: fromAgentId,
-      targets: implicit.map((t) => `${t.agentId}:${t.requiredOutputSchema}`),
-      reasons: implicit.map((t) => t.reason),
-    });
-  }
-  return directives;
 }
 
 async function invokeAgentAsync(opts: {
@@ -599,9 +523,10 @@ async function invokeAgentAsync(opts: {
       //   1. Schema validation failed + fallback_echo → echo directive wins.
       //   2. Else if validation passed and the agent emitted an explicit
       //      ```handoff``` block, use it.
-      //   3. Else (validation passed, no handoff block) evaluate implicit
-      //      tag-based rules (Phase 2), grouped per requiredOutputSchema so
-      //      each fanned-out receiver is validated against ITS schema.
+      //   3. No handoff block → chain ends naturally. The agent is expected
+      //      to produce a ```handoff``` block when it wants to route. No
+      //      implicit tag-based rules are evaluated — routing is always
+      //      explicit.
       //   4. On validation failure WITHOUT fallback_echo → route to Atlas so
       //      the orchestrator decides the next step (re-pick, adjust, etc.).
       const nextDirectives: HandoffDirectiveV2[] = [];
@@ -610,9 +535,9 @@ async function invokeAgentAsync(opts: {
       } else if (!validationFailed) {
         if (emittedHandoff) {
           nextDirectives.push(emittedHandoff);
-        } else {
-          nextDirectives.push(...buildImplicitDirectives(opts.roomId, result.content, tags, opts.agentId, id));
         }
+        // else: no handoff, chain ends. The agent either concluded or
+        // forgot to hand off — either way, no routing.
       } else if (validationFailed && !echoFallback) {
         // Route to Atlas with failure context so it can re-pick/adjust.
         const atlas = getAgentByName("atlas");
