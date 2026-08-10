@@ -1,7 +1,6 @@
 ---
 description: Analyst 分析师 — 数据 crunching、统计推断、表格图表推理；输入数据，输出判断
 mode: primary
-model: custom-saas/qwen-3.6-saas
 temperature: 0.1
 ---
 

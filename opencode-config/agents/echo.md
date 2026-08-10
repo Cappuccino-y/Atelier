@@ -1,7 +1,6 @@
 ---
 description: Echo 通用支持 — 只读，处理日常事务、汇总背景
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
 temperature: 0.3
 ---
 

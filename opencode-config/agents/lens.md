@@ -1,7 +1,6 @@
 ---
 description: Lens 审查者 — 只读，专注找问题、出 review
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
 temperature: 0.1
 ---
 

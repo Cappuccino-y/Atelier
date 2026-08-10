@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://atelier.local/agent-models.schema.json",
   "title": "Atelier agent-models configuration",
-  "description": "Maps each Atelier agent id to an opencode model key. Edit freely; takes effect on next server start.",
+  "description": "Maps each Atelier agent id to a model key (the value at runtime comes from this per-machine file, never from this repo). Edit freely; takes effect on next server start.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -32,15 +32,5 @@
       "description": "Free-form documentation. Ignored at runtime.",
       "additionalProperties": true
     }
-  },
-  "examples": [
-    {
-      "default": "custom-saas/minimax-MiniMax-M3-cp",
-      "models": {
-        "atlas": "preset:fast",
-        "forge": "custom-saas/minimax-MiniMax-M3-cp",
-        "lens": "comagic/kimi-k2.6-saas"
-      }
-    }
-  ]
+  }
 }

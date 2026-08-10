@@ -25,10 +25,17 @@ export type AgentModelsConfig = {
 };
 
 const DEFAULT_AGENT_MODELS: AgentModelsConfig = {
-  default: "minimax2/MiniMax-M3",
+  default: "",
   models: {},
   presets: {},
 };
+
+/**
+ * Warn once if the server started without a resolved model — `agent-models.json`
+ * `default` empty and `OPENCODE_MODEL` env unset. Resolves to opencode CLI
+ * fallback at runtime, but flagged here so deploys don't silently ship empty.
+ */
+let _warnedAboutMissingModel = false;
 
 function loadAgentModelsConfig(): AgentModelsConfig {
   const candidates = [
@@ -48,9 +55,7 @@ function loadAgentModelsConfig(): AgentModelsConfig {
       // strip schema/notes which are not part of the runtime shape
       const { $schema: _schema, notes: _notes, ...rest } = parsed;
       return {
-        default: typeof rest.default === "string" && rest.default.length > 0
-          ? rest.default
-          : DEFAULT_AGENT_MODELS.default,
+        default: typeof rest.default === "string" ? rest.default : "",
         models: (rest.models && typeof rest.models === "object") ? rest.models : {},
         presets: (rest.presets && typeof rest.presets === "object") ? rest.presets : {},
       };
@@ -62,7 +67,7 @@ function loadAgentModelsConfig(): AgentModelsConfig {
   return DEFAULT_AGENT_MODELS;
 }
 
-const _envOpencodeModel = process.env.OPENCODE_MODEL ?? "minimax2/MiniMax-M3";
+const _envOpencodeModel = process.env.OPENCODE_MODEL ?? "";
 
 export const config = {
   port: parseInt(process.env.PORT ?? "8787", 10),
@@ -104,9 +109,18 @@ export function resolveAgentModel(
     }
     return raw;
   };
-  return lookup(agentModels.models[agentId])
+  const resolved = lookup(agentModels.models[agentId])
     ?? lookup(agentModels.default)
     ?? config.opencodeModel;
+  if (!resolved && !_warnedAboutMissingModel) {
+    _warnedAboutMissingModel = true;
+    console.warn(
+      "[config] no model resolved for any agent — set server/.env OPENCODE_MODEL " +
+      "or fill server/agent-models.json (per-machine config). " +
+      "opencode CLI will fall back to its own default at runtime.",
+    );
+  }
+  return resolved;
 }
 
 /**

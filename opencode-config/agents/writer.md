@@ -1,7 +1,6 @@
 ---
 description: Writer 写作者 — 把事实/分析/草稿润色成可发布文档（报告 / 文章 / 邮件 / README / 评审反馈）
 mode: primary
-model: custom-saas/qwen-3.6-saas
 temperature: 0.5
 ---
 

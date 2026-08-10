@@ -1,7 +1,6 @@
 ---
 description: Archivist 档案员 — 唯一允许写入 [MEMORY] 的 agent；提炼对话里的可复用经验，维护 KB 索引
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
 temperature: 0.1
 ---
 

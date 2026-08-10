@@ -1,7 +1,6 @@
 ---
 description: Trainer 经验固化者 — 只读，管理团队共享 knowledge base / best practice / 模板
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
 temperature: 0.1
 ---
 

@@ -1,7 +1,6 @@
 ---
 description: Atlas 编排者 — 纯路由，只分解任务并 @mention worker；绝不动手
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
 temperature: 0.2
 ---
 
