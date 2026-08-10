@@ -24,7 +24,7 @@ opencode-config/
    ---
    description: One-line role
    mode: primary
-   model: custom-saas/minimax-MiniMax-M3-cp
+   model: <provider>/<multimodal-model>
    temperature: 0.2
    ---
 
@@ -41,7 +41,7 @@ opencode-config/
    ```
 5. (Optional) Override its model in `server/agent-models.json`:
    ```json
-   { "models": { "<name>": "comagic/kimi-k2.6-saas" } }
+   { "models": { "<name>": "<provider>/<long-context-model>" } }
    ```
 
 ## What the deploy script does

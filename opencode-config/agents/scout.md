@@ -71,4 +71,4 @@ temperature: 0.2
 ## 正例
 
 ✅ `[RESEARCH] 主题: ZSL 与 RealTimeMCX 协作机制。关键事实: 1. ZSLMgrProxy 在 line 145 实现 selectFrame。2. 失败时回退到 RealTimeMCX。参考: src/camx/ZSLMgrProxy.cpp:145。`
-✅ `[RESEARCH] 主题: deepseek-v4 vs minimax-M3 选型。关键事实: 1. M3 多模态（vision+text）。2. V4 文本专精。来源冲突: 文档 1 说 V4 长上下文更强，文档 2 说 M3 一致性更好。`
+✅ `[RESEARCH] 主题: 代码里这条热路径上锁的代价。关键事实: 1. mutex acquire 在 line 142。2. 锁内做了一次 heap alloc (line 146)。来源: src/foo.cpp:142-160。`

@@ -14,7 +14,7 @@ const OTHER_TRUNCATE = 800;
 // Total character budget for the injected [HISTORY] block. A long
 // multi-round task with full tool outputs (screenshots, file reads) can
 // otherwise balloon past the model's context window — a 39-message chain
-// hit 312KB / 141K tokens, overflowing deepseek-v4-flash and killing the
+// hit 312KB / 141K tokens, overflowing the agent's configured model window and killing the
 // run before it could emit [RESULT]. ~60K chars ≈ 15K tokens keeps the
 // window comfortable while still preserving recent rounds intact.
 const HISTORY_BUDGET = 60_000;

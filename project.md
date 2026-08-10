@@ -75,7 +75,7 @@ opencode per-agent 配置在 `~/.config/opencode/` (Windows: `C:\Users\<user>\.c
 
 ```jsonc
 {
-  "model": "custom-saas/minimax-MiniMax-M3-cp",
+  "model": "<provider>/<multimodal-model>",
   "agent": {
     "atlas": {
       "mode": "primary",
@@ -110,7 +110,7 @@ opencode per-agent 配置在 `~/.config/opencode/` (Windows: `C:\Users\<user>\.c
 ---
 description: Atlas 编排器 — 纯路由，只分解任务并 @mention worker；绝不动手
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
+model: <provider>/<multimodal-model>
 temperature: 0.2
 ---
 
@@ -136,7 +136,7 @@ temperature: 0.2
 ---
 description: Lens 审查者 — 只读，专注找问题、出 review
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
+model: <provider>/<multimodal-model>
 temperature: 0.1
 ---
 
@@ -162,7 +162,7 @@ temperature: 0.1
 ---
 description: Echo 通用支持 — 只读，日常事务
 mode: primary
-model: custom-saas/minimax-MiniMax-M3-cp
+model: <provider>/<multimodal-model>
 temperature: 0.3
 ---
 
@@ -205,7 +205,7 @@ CREATE INDEX idx_messages_room ON messages(room_id, timestamp);
 ```env
 PORT=8787
 AGENT_RUNTIME=opencode
-OPENCODE_MODEL=custom-saas/minimax-MiniMax-M3-cp
+OPENCODE_MODEL=<provider>/<multimodal-model>
 OPENCODE_TIMEOUT=600000
 AGENT_MAPPING=atlas:atlas,forge:build,lens:lens,echo:echo
 OPENCODE_HANDOFF_DEPTH=50

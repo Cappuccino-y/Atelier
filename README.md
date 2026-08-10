@@ -173,18 +173,18 @@ atelier logs server     # tail server 日志
 
 ```json
 {
-  "default": "custom-saas/minimax-MiniMax-M3-cp",
+  "default": "<provider>/<multimodal-model>",
   "models": {
     "atlas":  "preset:fast",                       // 编排器，便宜就行
-    "forge":  "custom-saas/minimax-MiniMax-M3-cp", // 实现者，要能写代码
-    "lens":   "comagic/kimi-k2.6-saas",           // 审查者，长上下文友好
+    "forge":  "<provider>/<multimodal-model>", // 实现者，要能写代码
+    "lens":   "<provider>/<long-context-model>",           // 审查者，长上下文友好
     "echo":   "preset:fast",
-    "trainer": "custom-saas/minimax-MiniMax-M3-cp"
+    "trainer": "<provider>/<multimodal-model>"
   },
   "presets": {
-    "fast":     "comagic/qwen3.6-flash-saas",
-    "balanced": "custom-saas/qwen-3.6-saas",
-    "deep":     "custom-saas/glm-5-saas"
+    "fast":     "<provider>/<cheap-flash>",
+    "balanced": "<provider>/<balanced-model>",
+    "deep":     "<provider>/<deep-model>"
   }
 }
 ```
@@ -200,7 +200,7 @@ models[<agentId>]   →   default   →   OPENCODE_MODEL env 兜底
 任何字符串以 `preset:` 开头即查 `presets` 表，支持嵌套引用：
 
 ```json
-"models": { "lens": "preset:deep" }    // → custom-saas/glm-5-saas
+"models": { "lens": "preset:deep" }    // → <provider>/<deep-model>
 "presets": { "deep": "preset:vision" } // → 间接引用
 ```
 
@@ -219,7 +219,7 @@ curl http://127.0.0.1:8787/api/runtime/agent-models | jq
 # 原子覆盖
 curl -X PUT http://127.0.0.1:8787/api/runtime/agent-models \
   -H "Content-Type: application/json" \
-  -d '{"config": {"default": "comagic/qwen-3.6-saas", "models": {"atlas": "preset:fast"}}}'
+  -d '{"config": {"default": "<provider>/<balanced-model>", "models": {"atlas": "preset:fast"}}}'
 ```
 
 > ⚠️ 模型 key 必须出现在你的 `~/.config/opencode/opencode.json` 的 `provider.*.models.*` 列表里。`notes` 块仅作文档，运行时不读。
@@ -228,16 +228,16 @@ curl -X PUT http://127.0.0.1:8787/api/runtime/agent-models \
 
 | Agent | 角色 | 推荐模型 | 原因 |
 |---|---|---|---|
-| Atlas | 编排器 | fast preset / Qwen-Flash | 只路由，不深想，便宜即可 |
-| Forge | 实现者 | MiniMax-M3 / DeepSeek-V4-Pro | 代码生成能力强 |
-| Lens  | 审查者 | MiniMax-M3 / Kimi-K2.6 | 仔细读 + 长上下文友好 |
+| Atlas | 编排器 | fast preset / <cheap-flash> | 只路由，不深想，便宜即可 |
+| Forge | 实现者 | <multimodal-model> / <strong-coder-model> | 代码生成能力强 |
+| Lens  | 审查者 | <multimodal-model> / <long-context-model> | 仔细读 + 长上下文友好 |
 | Echo  | 支援 + 兜底 | preset:fast | 短回复 + always-available |
-| Trainer | 经验固化 | MiniMax-M3 | 结构化输出稳 |
+| Trainer | 经验固化 | <multimodal-model> | 结构化输出稳 |
 | Scout | 调研 | preset:fast | 多源读，便宜 |
-| Analyst | 分析 | qwen-3.6-saas / balanced | 推理仔细但不是顶配 |
-| Writer | 撰写 | qwen-3.6-saas / balanced | 文风感知 |
-| Archivist | KB | MiniMax-M3 / preset:deep | 提炼 evergreen pattern |
-| Lens | 视觉 + 审查 | MiniMax-M3（**必须多模态**）| 图像 / 视频帧输入 + 截图验证 |
+| Analyst | 分析 | <balanced-model> / balanced | 推理仔细但不是顶配 |
+| Writer | 撰写 | <balanced-model> / balanced | 文风感知 |
+| Archivist | KB | <multimodal-model> / preset:deep | 提炼 evergreen pattern |
+| Lens | 视觉 + 审查 | <multimodal-model>（**必须多模态**）| 图像 / 视频帧输入 + 截图验证 |
 
 ---
 
@@ -247,15 +247,15 @@ v2 roster 在 `~/.config/opencode/agents/` 里，按能力域拆开：
 
 | Agent | 角色 | 触发方式 | 典型模型 |
 |---|---|---|---|
-| 🧭 **Atlas** | 编排（纯路由，绝不动手） | `@Atlas` | `minimax-MiniMax-M3-cp` |
-| 🔨 **Forge** | 实现（写代码 / 改配置 / 跑命令） | `@Forge` | `minimax-MiniMax-M3-cp` |
-| 🔍 **Lens**  | 评审（只读，找问题出 `[REVIEW]`）+ **视觉验证**（截图看图） | `@Lens` 或 `[RESULT]` 后自动 | `minimax-MiniMax-M3-cp` |
-| 💬 **Echo**  | 支援 + **失败兜底** chain 第一站 | `@Echo` | `preset:fast`（Qwen-Flash） |
-| 📒 **Trainer** | 经验固化 / rules / template | `@Trainer` | `minimax-MiniMax-M3-cp` |
+| 🧭 **Atlas** | 编排（纯路由，绝不动手） | `@Atlas` | `<multimodal-model>` |
+| 🔨 **Forge** | 实现（写代码 / 改配置 / 跑命令） | `@Forge` | `<multimodal-model>` |
+| 🔍 **Lens**  | 评审（只读，找问题出 `[REVIEW]`）+ **视觉验证**（截图看图） | `@Lens` 或 `[RESULT]` 后自动 | `<multimodal-model>` |
+| 💬 **Echo**  | 支援 + **失败兜底** chain 第一站 | `@Echo` | `preset:fast`（<cheap-flash>） |
+| 📒 **Trainer** | 经验固化 / rules / template | `@Trainer` | `<multimodal-model>` |
 | 🔎 **Scout** | 调研（多源交叉验证 → `[RESEARCH]`） | `@Scout` | `preset:fast` |
-| 📊 **Analyst** | 分析 / 对比 / 推断（带置信度 → `[ANALYSIS]`） | `@Analyst` | `qwen-3.6-saas` |
-| ✍️ **Writer** | 撰写报告 / 邮件 / 文档（→ `[DOCUMENT]`） | `@Writer` | `qwen-3.6-saas` |
-| 🗄️ **Archivist** | **唯一**允许写 `[MEMORY]` 的 agent | `@Archivist` | `minimax-MiniMax-M3-cp` |
+| 📊 **Analyst** | 分析 / 对比 / 推断（带置信度 → `[ANALYSIS]`） | `@Analyst` | `<balanced-model>` |
+| ✍️ **Writer** | 撰写报告 / 邮件 / 文档（→ `[DOCUMENT]`） | `@Writer` | `<balanced-model>` |
+| 🗄️ **Archivist** | **唯一**允许写 `[MEMORY]` 的 agent | `@Archivist` | `<multimodal-model>` |
 
 ### 推进对话的两种方式
 
@@ -466,7 +466,7 @@ VITE_WS_URL=ws://127.0.0.1:8787/ws
 
 ```bash
 AGENT_RUNTIME=opencode               # "opencode" | "mock"
-OPENCODE_MODEL=custom-saas/minimax-MiniMax-M3-cp   # 默认 model
+OPENCODE_MODEL=<provider>/<multimodal-model>   # 默认 model
 PORT=8787
 HOST=127.0.0.1
 OPENCODE_TIMEOUT=600000              # 单次 agent 调用超时（ms）

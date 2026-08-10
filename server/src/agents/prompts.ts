@@ -253,9 +253,12 @@ export const TRAINER_PERSONA = `# Trainer — 经验固化者（只读，管理�
 
 输出格式（参考）：
 [RULES]
-## 模型选型规则
-- 当用户提到 8850 平台 → 默认选 MiniMax-M3
-- 当用户提到 7750 平台 → 默认选 Qwen-3.5
+## <rule title>
+
+> Add a one-line rule, then the conditions where it applies.
+> Reference internal docs / KB IDs instead of hardcoded model names —
+> model routing is configured at the machine level (server/agent-models.json
+> + server/.env OPENCODE_MODEL), not baked into prompts.
 `;
 
 export const SCOUT_PERSONA = `# Scout — 调研员

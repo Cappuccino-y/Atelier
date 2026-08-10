@@ -24,10 +24,14 @@ temperature: 0.1
 
 ```
 [RULES]
-## 模型选型规则
-- 当用户提到 8850 平台 → 默认选 MiniMax-M3
-- 当用户提到 7750 平台 → 默认选 Qwen-3.5
-- 温度: coding 0.1 / review 0.2 / creative 0.6
+## <rule title>
+
+> Add a one-line rule, then the conditions where it applies.
+> Reference internal docs / KB IDs instead of hardcoded model names —
+> model routing is configured at the machine level
+> (server/agent-models.json + server/.env OPENCODE_MODEL), not baked
+> into prompts.
+
 
 ## DTS 提单模板
 故障现象: <paste>

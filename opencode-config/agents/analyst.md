@@ -65,5 +65,4 @@ temperature: 0.1
 
 ## 正例
 
-✅ `[ANALYSIS] 问题: 哪个模型更适合 Lens 评审？发现: [high] MiniMax-M3 在结构化 review 输出稳定（5/5 命中 REVEW 标签）；[medium] Kimi-K2.6 长上下文友好但慢 2x。建议: Lens 用 MiniMax-M3 + 必要时给 Kimi 兜底长 diff。`
 ✅ `[ANALYSIS] 问题: 这段 QPS 下降是代码 bug 还是流量？发现: [high] 错误码分布未变（排除代码 bug）；[medium] P99 延迟同步上升（疑似下游慢）。建议: 优先排查下游依赖。`
