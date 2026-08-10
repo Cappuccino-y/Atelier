@@ -303,7 +303,7 @@ function buildImplicitDirectives(
       taskSummary,
       requiredOutputSchema: schema,
       failurePolicy: {
-        onInvalidOutput: "fallback_echo",
+        onInvalidOutput: "retry",
         onTimeout: "fallback_echo",
         maxRetries: 1,
       },
@@ -438,7 +438,7 @@ async function invokeAgentAsync(opts: {
       // invalid output from fanning out to the agents it asked for.
       const requiredSchema = opts.handoff?.requiredOutputSchema;
       const failurePolicy = opts.handoff?.failurePolicy ?? {
-        onInvalidOutput: "fallback_echo" as const,
+        onInvalidOutput: "retry" as const,
         onTimeout: "fallback_echo" as const,
         maxRetries: 1,
       };
