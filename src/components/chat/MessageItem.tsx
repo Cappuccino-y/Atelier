@@ -666,7 +666,9 @@ export const MessageItem = memo(function MessageItem({
               </div>
             )}
 
-            <ReactionsBar roomId={message.roomId} messageId={message.id} reactions={message.reactions} />
+            {!isUser && (
+              <ReactionsBar roomId={message.roomId} messageId={message.id} reactions={message.reactions} />
+            )}
           </>
         )}
       </div>
@@ -685,12 +687,15 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
   const handleReact = useCallback(async (emoji: string) => {
     if (busy) return;
     setBusy(true);
-    // Optimistic update — flip the local count immediately so the UI
-    // doesn't lag behind the click. The server response re-syncs below.
+    // Optimistic toggle — flip this user's vote immediately. The server's
+    // response (which is the source of truth, including other reactors)
+    // re-syncs below.
     setLocalReactions(prev => {
-      const existing = prev[emoji];
       const next: MessageReactions = { ...prev };
-      if (existing) {
+      const existing = next[emoji];
+      if (existing && existing.count > 0) {
+        // optimistic remove: hide entirely; the server-side count from
+        // other reactors will repopulate if needed
         delete next[emoji];
       } else {
         next[emoji] = { count: 1 };
@@ -701,7 +706,6 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
       const updated = await api.toggleReaction(roomId, messageId, emoji);
       if (updated.reactions) setLocalReactions(updated.reactions);
     } catch {
-      // rollback on error
       setLocalReactions(reactions ?? {});
     } finally {
       setBusy(false);
@@ -726,15 +730,13 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-1">
       {entries.map(([emoji, data]) => (
-        <button
+        <ReactionPill
           key={emoji}
+          emoji={emoji}
+          count={data.count}
           onClick={() => handleReact(emoji)}
-          title={`Click to remove your ${emoji}`}
-          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] bg-zinc-100 border border-zinc-200 hover:bg-zinc-200 transition-colors active:scale-95"
-        >
-          <span>{emoji}</span>
-          <span className="text-zinc-600 font-medium">{data.count}</span>
-        </button>
+          onRemove={() => handleReact(emoji)}
+        />
       ))}
       <div className="relative">
         <button
@@ -746,22 +748,60 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
         </button>
         {showPicker && (
           <div className="absolute bottom-full left-0 mb-1 z-10 flex gap-1 bg-white border border-zinc-200 rounded-lg shadow-lg p-1.5">
-            {EMOJI_PICKER.map(e => (
-              <button
-                key={e}
-                onClick={() => handleReact(e)}
-                className={cn(
-                  "text-base hover:scale-125 transition-transform px-1 rounded",
-                  entries.some(([k]) => k === e) && "bg-indigo-100"
-                )}
-                title={entries.some(([k]) => k === e) ? `Remove ${e}` : `Add ${e}`}
-              >
-                {e}
-              </button>
-            ))}
+            {EMOJI_PICKER.map(e => {
+              const picked = entries.some(([k]) => k === e);
+              return (
+                <button
+                  key={e}
+                  onClick={() => handleReact(e)}
+                  className={cn(
+                    "text-base hover:scale-125 transition-transform px-1 rounded",
+                    picked && "bg-indigo-100 ring-1 ring-indigo-300"
+                  )}
+                  title={picked ? `Remove ${e}` : `Add ${e}`}
+                >
+                  {e}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Single reaction chip. Hover reveals an explicit × cancel affordance so
+ * the user knows how to retract their vote. Active state (scale + ring)
+ * fires for 180ms after a click so the action feels acknowledged.
+ */
+function ReactionPill({ emoji, count, onClick, onRemove }: {
+  emoji: string;
+  count: number;
+  onClick: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title="Click to remove"
+      className={cn(
+        "group inline-flex items-center gap-1 pl-1.5 pr-1 py-0.5 rounded-md text-[11px]",
+        "bg-zinc-100 border border-zinc-200 text-zinc-700",
+        "hover:bg-zinc-200 active:scale-95 transition-all duration-150"
+      )}
+    >
+      <span>{emoji}</span>
+      <span className="font-medium tabular-nums">{count}</span>
+      <span
+        role="button"
+        aria-label={`Remove ${emoji}`}
+        onClick={(e) => { e.stopPropagation(); onRemove(); }}
+        className="ml-0.5 -mr-0.5 w-3 h-3 flex items-center justify-center rounded-full text-zinc-400 hover:text-zinc-700 hover:bg-zinc-300/70 opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        ×
+      </span>
+    </button>
   );
 }

@@ -9,7 +9,7 @@ export type Agent = {
   lastSeen?: number;
 };
 
-export type MessageReactions = Record<string, { count: number }>;
+export type MessageReactions = Record<string, { count: number; reactors?: string[] }>;
 
 export type Message = {
   id: string;

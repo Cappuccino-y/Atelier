@@ -47,7 +47,7 @@ export function loadRoomThread(roomId: string, agentId: string): ChatMessage[] {
     // Cheap to parse; reactions JSON is tiny.
     let reactionLine = "";
     try {
-      const reactions = JSON.parse(m.reactions || "{}") as Record<string, { count: number }>;
+      const reactions = JSON.parse(m.reactions || "{}") as Record<string, { count: number; reactors?: string[] }>;
       const entries = Object.entries(reactions).filter(([, v]) => v.count > 0);
       if (entries.length > 0) {
         reactionLine = ` [reactions: ${entries.map(([e, v]) => `${e}${v.count}`).join(" ")}]`;

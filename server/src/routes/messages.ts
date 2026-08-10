@@ -36,21 +36,33 @@ export async function routes(app: FastifyInstance) {
     return msg;
   });
 
-  app.post<{ Params: { roomId: string; messageId: string }; Body: { emoji: string } }>(
+  app.post<{ Params: { roomId: string; messageId: string }; Body: { emoji: string; userId?: string } }>(
     "/api/rooms/:roomId/messages/:messageId/reactions",
     async (req, reply) => {
       const { emoji } = req.body;
+      const userId = req.body.userId ?? "user";
       if (!emoji) return reply.code(400).send({ error: "emoji required" });
 
       const row = db.prepare("SELECT * FROM messages WHERE id = ?").get(req.params.messageId) as any;
       if (!row) return reply.code(404).send({ error: "message not found" });
 
-      const reactions = JSON.parse(row.reactions || "{}");
+      // Toggle semantics — each user gets at most one vote per emoji.
+      // reactor ids are stored alongside the count so we can both dedupe
+      // and (later) render per-user highlight in the UI.
+      const reactions = JSON.parse(row.reactions || "{}") as Record<string, { count: number; reactors: string[] }>;
       const existing = reactions[emoji];
       if (existing) {
-        existing.count += 1;
+        const reactors = existing.reactors ?? [];
+        const idx = reactors.indexOf(userId);
+        if (idx >= 0) {
+          reactors.splice(idx, 1);
+        } else {
+          reactors.push(userId);
+        }
+        existing.count = reactors.length;
+        if (existing.count === 0) delete reactions[emoji];
       } else {
-        reactions[emoji] = { count: 1 };
+        reactions[emoji] = { count: 1, reactors: [userId] };
       }
 
       db.prepare("UPDATE messages SET reactions = ? WHERE id = ?")
