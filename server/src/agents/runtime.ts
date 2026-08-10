@@ -24,11 +24,11 @@ export type ChatMessage = {
   content: string;
 };
 
-type Row = { author_id: string; content: string; timestamp: number };
+type Row = { author_id: string; content: string; timestamp: number; reactions: string };
 
 export function loadRoomThread(roomId: string, agentId: string): ChatMessage[] {
   const rows = db.prepare(`
-    SELECT author_id, content, timestamp FROM messages
+    SELECT author_id, content, timestamp, reactions FROM messages
     WHERE room_id = ?
     ORDER BY timestamp DESC LIMIT ?
   `).all(roomId, HISTORY_LIMIT) as Row[];
@@ -42,12 +42,23 @@ export function loadRoomThread(roomId: string, agentId: string): ChatMessage[] {
     const isSelf = m.author_id === agentId;
     const stamp = `[${m.author_id} ${new Date(m.timestamp).toLocaleTimeString()}]\n`;
     const raw = isSelf ? m.content : truncate(m.content, OTHER_TRUNCATE);
-    const size = stamp.length + raw.length;
-    let body = raw;
+    // Surface user reactions on agent messages so the agent can self-monitor
+    // satisfaction (👍/❤️ → keep doing this, 👎/😢 → consider revising).
+    // Cheap to parse; reactions JSON is tiny.
+    let reactionLine = "";
+    try {
+      const reactions = JSON.parse(m.reactions || "{}") as Record<string, { count: number }>;
+      const entries = Object.entries(reactions).filter(([, v]) => v.count > 0);
+      if (entries.length > 0) {
+        reactionLine = ` [reactions: ${entries.map(([e, v]) => `${e}${v.count}`).join(" ")}]`;
+      }
+    } catch {}
+    const size = stamp.length + raw.length + reactionLine.length;
+    let body = raw + reactionLine;
     if (size > budget) {
       // drop enough so this entry fits the remaining budget
-      const keep = Math.max(0, budget - stamp.length);
-      body = keep > 0 ? truncate(raw, keep) : "";
+      const keep = Math.max(0, budget - stamp.length - reactionLine.length);
+      body = keep > 0 ? truncate(raw, keep) + reactionLine : reactionLine;
       if (!body) continue;
     }
     budget -= stamp.length + body.length;

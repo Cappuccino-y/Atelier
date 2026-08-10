@@ -679,15 +679,34 @@ const EMOJI_PICKER = ["👍", "🎉", "❤️", "😄", "😢", "🔥"];
 function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messageId: string; reactions?: MessageReactions }) {
   const [showPicker, setShowPicker] = useState(false);
   const [localReactions, setLocalReactions] = useState<MessageReactions>(reactions ?? {});
+  const [busy, setBusy] = useState(false);
   useEffect(() => { setLocalReactions(reactions ?? {}); }, [reactions]);
 
   const handleReact = useCallback(async (emoji: string) => {
-    setShowPicker(false);
+    if (busy) return;
+    setBusy(true);
+    // Optimistic update — flip the local count immediately so the UI
+    // doesn't lag behind the click. The server response re-syncs below.
+    setLocalReactions(prev => {
+      const existing = prev[emoji];
+      const next: MessageReactions = { ...prev };
+      if (existing) {
+        delete next[emoji];
+      } else {
+        next[emoji] = { count: 1 };
+      }
+      return next;
+    });
     try {
       const updated = await api.toggleReaction(roomId, messageId, emoji);
       if (updated.reactions) setLocalReactions(updated.reactions);
-    } catch {}
-  }, [roomId, messageId]);
+    } catch {
+      // rollback on error
+      setLocalReactions(reactions ?? {});
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, roomId, messageId, reactions]);
 
   const entries = Object.entries(localReactions);
   if (entries.length === 0 && !showPicker) {
@@ -700,8 +719,8 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
         >
           + Reaction
         </button>
-</div>
-  );
+      </div>
+    );
   }
 
   return (
@@ -710,25 +729,39 @@ function ReactionsBar({ roomId, messageId, reactions }: { roomId: string; messag
         <button
           key={emoji}
           onClick={() => handleReact(emoji)}
-          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] bg-zinc-100 border border-zinc-200 hover:bg-zinc-200 transition-colors"
+          title={`Click to remove your ${emoji}`}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] bg-zinc-100 border border-zinc-200 hover:bg-zinc-200 transition-colors active:scale-95"
         >
           <span>{emoji}</span>
           <span className="text-zinc-600 font-medium">{data.count}</span>
         </button>
       ))}
-      <button
-        onClick={() => setShowPicker(v => !v)}
-        className="text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded transition-colors"
-      >
-        +
-      </button>
-      {showPicker && (
-        <div className="flex gap-1">
-          {EMOJI_PICKER.filter(e => !entries.some(([k]) => k === e)).map(e => (
-            <button key={e} onClick={() => handleReact(e)} className="text-sm hover:scale-110 transition-transform">{e}</button>
-          ))}
-        </div>
-      )}
+      <div className="relative">
+        <button
+          onClick={() => setShowPicker(v => !v)}
+          className="text-[11px] text-zinc-400 hover:text-zinc-600 px-1 py-0.5 rounded transition-colors"
+          title="Add reaction"
+        >
+          +
+        </button>
+        {showPicker && (
+          <div className="absolute bottom-full left-0 mb-1 z-10 flex gap-1 bg-white border border-zinc-200 rounded-lg shadow-lg p-1.5">
+            {EMOJI_PICKER.map(e => (
+              <button
+                key={e}
+                onClick={() => handleReact(e)}
+                className={cn(
+                  "text-base hover:scale-125 transition-transform px-1 rounded",
+                  entries.some(([k]) => k === e) && "bg-indigo-100"
+                )}
+                title={entries.some(([k]) => k === e) ? `Remove ${e}` : `Add ${e}`}
+              >
+                {e}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
