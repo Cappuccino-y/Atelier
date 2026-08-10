@@ -79,6 +79,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tasks_room ON tasks(room_id);
 `);
 
+// Additive migrations — older DB files predated these columns and CREATE
+// TABLE IF NOT EXISTS won't add them. Try/catch so already-migrated DBs
+// don't blow up on startup.
+try { db.exec("ALTER TABLE messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '{}'"); } catch {}
+
 type CountRow = { count: number };
 
 type SeedMessage = {
