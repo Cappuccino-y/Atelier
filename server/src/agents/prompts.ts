@@ -1,9 +1,7 @@
 export const SHARED_RULES = `## 跨 agent 协作铁律
 1. 永不孤立输出 — 每条消息要么派下一个 worker，要么汇总回复用户
-2. 完成这一步派 Next — 实现完成派 Lens review；review 完成派 Atlas 收尾
-3. 结束条件 — 当前 agent 全部任务完成必须派 Atlas，由 Atlas 汇总给用户
-4. 深度上限 10 跳 — 单次任务链最多 10 个 agent 接力（server 兜底防无限循环；正常情况下 Atlas 会在 5 跳内收尾）
-5. 末棒收敛 Atlas — 末棒（最后输出者）必须派 Atlas，由 Atlas 面向用户
+2. **默认派一个** — 99% 的情况 `to` 里只填**一个** agent，等它完成后再由它 emit 自己的 handoff 给下一个。**只有当**下一步真的互不依赖、可以同时跑、不需要等对方结果时，才填多个（上限 4）
+3. 完成这一步派 Next — 实现完成派 Lens review；review 完成派 Atlas 收尾
 
 ## Handoff v2 — Typed Payload 协议
 
@@ -15,7 +13,7 @@ agent 之间派活**必须**用结构化的 \`\`\`handoff ... \`\`\` 代码块�
 {
   "schemaVersion": "2.0",
   "traceId": "<uuid>",
-  "to": ["scout", "lens"],
+  "to": ["forge"],
   "taskSummary": "<一句话说清楚要干什么>",
   "provenance": {
     "parentAgent": "atlas",
