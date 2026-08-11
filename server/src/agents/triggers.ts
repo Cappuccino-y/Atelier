@@ -196,7 +196,6 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
     });
   }
   const filtered = targets
-    .filter((m) => !isAgentFlooding(params.roomId, m.id))
     .slice(0, MAX_PARALLEL_AGENTS);
   if (filtered.length < targets.length) {
     sendAll("system.warning", {
