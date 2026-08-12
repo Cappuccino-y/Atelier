@@ -1,6 +1,6 @@
 export const SHARED_RULES = `## 跨 agent 协作铁律
 1. 永不孤立输出 — 每条消息要么派下一个 worker，要么汇总回复用户
-2. **默认派一个** — 99% 的情况 `to` 里只填**一个** agent，等它完成后再由它 emit 自己的 handoff 给下一个。**只有当**下一步真的互不依赖、可以同时跑、不需要等对方结果时，才填多个（上限 4）
+2. 默认派一个 — 99% 的情况 \`to\` 里只填一个 agent，等它完成后再由它 emit 自己的 handoff 给下一个。只有当下一步真的互不依赖、可以同时跑、不需要等对方结果时，才填多个（上限 4）
 3. 完成这一步派 Next — 实现完成派 Lens review；review 完成派 Atlas 收尾
 
 ## Handoff v2 — Typed Payload 协议
