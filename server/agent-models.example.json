@@ -1,0 +1,25 @@
+{
+  "$schema": "agent-models.schema.json",
+  "default": "custom-saas/minimax-MiniMax-M3-cp",
+  "models": {
+    "atlas": "custom-saas/minimax-MiniMax-M3-cp",
+    "scout": "comagic/qwen3.7-plus",
+    "analyst": "custom-saas/minimax-MiniMax-M3-cp",
+    "archivist": "custom-saas/minimax-MiniMax-M3-cp",
+    "lens": "custom-saas/minimax-MiniMax-M3-cp",
+    "forge": "comagic/deepseek-v4-pro-saas",
+    "writer": "comagic/qwen3.7-plus",
+    "echo": "comagic/deepseek-v4-flash-saas",
+    "trainer": "comagic/minimax-m2.7-saas"
+  },
+  "presets": {
+    "fast": "comagic/deepseek-v4-flash-saas",
+    "smart": "custom-saas/minimax-MiniMax-M3-cp"
+  },
+  "notes": {
+    "说明": "这是 agent-models.json 的示例模板。deploy 时若本地没有 agent-models.json，会从本文件复制一份。",
+    "model 命名": "provider/model-id 格式。provider 必须是 ~/.config/opencode/opencode.json 里配过的（comagic 或 custom-saas），model-id 必须在该 provider 的 models 里存在。",
+    "吃图的 model": "custom-saas/minimax-MiniMax-M3-cp 已配 attachment:true + modalities.image，可做视觉审查。",
+    "务必改": "每个机器/环境的 provider 名和 model 名可能不同，复制后按需修改。"
+  }
+}

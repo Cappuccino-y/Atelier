@@ -178,6 +178,7 @@ $OpencodeAgentsDir = Join-Path $OpencodeRoot "agents"
 $OpencodeJson = Join-Path $OpencodeRoot "opencode.json"
 $ServerEnv = Join-Path $Root "server\.env"
 $AgentModelsJson = Join-Path $Root "server\agent-models.json"
+$AgentModelsExample = Join-Path $Root "server\agent-models.example.json"
 $TemplateDir = Join-Path $Root "opencode-config"
 $TemplateAgentsDir = Join-Path $TemplateDir "agents"
 $TemplateAgentsJson = Join-Path $TemplateDir "opencode-agents.template.json"
@@ -216,11 +217,17 @@ if (-not $DryRun -and -not (Test-Path $ServerEnv)) {
   Say "  [=] server\.env exists"
 }
 
-# 1c. server/agent-models.json (if missing, just confirm — we ship a default already)
+# 1c. server/agent-models.json — per-machine config. If missing, create it
+#     from the .example template (never overwrite an existing one).
 if (Test-Path $AgentModelsJson) {
-  Ok "server\agent-models.json exists"
+  Say "  [=] server\agent-models.json exists (preserved)"
+} elseif (Test-Path $AgentModelsExample) {
+  if (-not $DryRun) {
+    Copy-Item -LiteralPath $AgentModelsExample -Destination $AgentModelsJson -Force
+  }
+  Ok "server\agent-models.json created from agent-models.example.json"
 } else {
-  Warn "server\agent-models.json missing — please check your $Root\server dir"
+  Warn "server\agent-models.json missing and no .example template — please create it manually"
 }
 
 # 1d. merge opencode-agents.template.json into ~/.config/opencode/opencode.json
@@ -245,6 +252,10 @@ if (Test-Path $TemplateAgentsJson) {
       Say "  [!] opencode.json has NO provider/mcp blocks yet. Copy them from a"
       Say "      working setup, or run 'opencode auth login' first — otherwise"
       Say "      'atelier start' agents can't reach any LLM."
+      # Strip non-schema meta fields (anything starting with "_" — e.g.
+      # _comment). opencode strictly rejects unknown top-level keys, so any
+      # such field baked into a template would crash the CLI on startup.
+      $template.PSObject.Properties | Where-Object { $_.Name -like "_*" } | ForEach-Object { $template.PSObject.Properties.Remove($_.Name) }
       $template | ConvertTo-Json -Depth 10 | Set-Content -Path $OpencodeJson -Encoding UTF8
       Ok "$OpencodeJson created"
     } else {
@@ -261,10 +272,23 @@ if (Test-Path $TemplateAgentsJson) {
         }
       }
       if ($merged -gt 0) {
+        # Strip non-schema meta fields (anything starting with "_") from the
+        # user config before serializing — opencode strictly rejects unknown
+        # top-level keys, so any stale "_comment" / "_meta" / etc. would
+        # crash the CLI on startup.
+        $userConfig.PSObject.Properties | Where-Object { $_.Name -like "_*" } | ForEach-Object { $userConfig.PSObject.Properties.Remove($_.Name) }
         $userConfig | ConvertTo-Json -Depth 20 | Set-Content -Path $OpencodeJson -Encoding UTF8
         Ok "opencode.json updated ($merged new agent(s))"
       } else {
-        Say "  [=] opencode.json unchanged"
+        # No merge needed but still clean stale meta fields defensively.
+        $dirty = $userConfig.PSObject.Properties | Where-Object { $_.Name -like "_*" }
+        if ($dirty) {
+          $dirty | ForEach-Object { $userConfig.PSObject.Properties.Remove($_.Name) }
+          $userConfig | ConvertTo-Json -Depth 20 | Set-Content -Path $OpencodeJson -Encoding UTF8
+          Say "  [=] stripped $(@($dirty).Count) meta field(s) from existing $OpencodeJson"
+        } else {
+          Say "  [=] opencode.json unchanged"
+        }
       }
     }
   } else {
