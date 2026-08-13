@@ -35,10 +35,10 @@ export type AgentRunResult = {
 };
 
 const MOCK_RESPONSES: Record<string, string> = {
-  atlas: `[DECISION] 收到，拆分为实现任务。\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":["forge"],"taskSummary":"实现需求（mock）","requiredOutputSchema":"result_block"}\n\`\`\``,
-  forge: `[RESULT] 实现完成（mock）。变更：新增 2 个文件，修改 1 个函数。\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":["lens"],"taskSummary":"review 上述实现（mock）","requiredOutputSchema":"review_block"}\n\`\`\``,
+  atlas: `[DECISION] 收到，拆分为实现任务。\n\n{"schemaVersion":"2.0","to":["forge"],"taskSummary":"实现需求（mock）","requiredOutputSchema":"result_block"}`,
+  forge: `[RESULT] 实现完成（mock）。变更：新增 2 个文件，修改 1 个函数。\n\n{"schemaVersion":"2.0","to":["lens"],"taskSummary":"review 上述实现（mock）","requiredOutputSchema":"review_block"}`,
   lens: `[REVIEW]\n- **minor**: 命名一致性\n  - location: src/foo.ts:42\n  - quote: const a = 1\n  - suggested: 改为 const count = 1\n\nLens 全部 minor，无需返工。`,
-  echo: `[QUESTION] 这个问题需要更多信息。\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":["atlas"],"taskSummary":"澄清需求（mock）","requiredOutputSchema":"decision_block"}\n\`\`\``,
+  echo: `[QUESTION] 这个问题需要更多信息。\n\n{"schemaVersion":"2.0","to":["atlas"],"taskSummary":"澄清需求（mock）","requiredOutputSchema":"answer_text"}`,
 };
 
 export async function runOpenCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
