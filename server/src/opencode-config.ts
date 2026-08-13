@@ -102,10 +102,17 @@ export function ensureOpencodeAgents(): OpenCodeSyncResult {
     return result;
   }
 
-  // 3. Read the bundled template.
+  // 3. Read the bundled template. Strip any non-schema meta fields
+  //    (anything starting with "_") — opencode strictly rejects unknown
+  //    top-level keys, so a stray "_comment" / "_meta" in the template
+  //    would crash the CLI on startup.
   let template: { agent?: Record<string, AgentValue> };
   try {
-    template = JSON.parse(readFileSync(TEMPLATE_JSON, "utf8"));
+    const raw = JSON.parse(readFileSync(TEMPLATE_JSON, "utf8"));
+    for (const k of Object.keys(raw)) {
+      if (k.startsWith("_")) delete (raw as Record<string, unknown>)[k];
+    }
+    template = raw;
   } catch (err) {
     result.skipped = true;
     result.skipReason = `template ${TEMPLATE_JSON} is invalid or missing`;

@@ -1,5 +1,4 @@
 {
-  "_comment": "Partial opencode.json template — only the 'agent' block. The deploy script DEEP-MERGES this into ~/.config/opencode/opencode.json, preserving your existing provider/mcp/plugin blocks. To add new agents, drop a *.md into opencode-config/agents/ and add an entry here.",
   "agent": {
     "atlas": {
       "description": "Atlas 编排者 — 纯路由，只分解任务并 @mention worker；绝不动手",
@@ -85,7 +84,8 @@
         "todowrite": "deny",
         "question": "deny",
         "external_directory": "allow",
-        "doom_loop": "allow"
+        "doom_loop": "allow",
+        "capture_screen": "allow"
       }
     },
     "echo": {
