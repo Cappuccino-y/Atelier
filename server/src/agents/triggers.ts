@@ -547,7 +547,7 @@ async function invokeAgentAsync(opts: {
             rawTraceId: "",
             to: [{ id: atlas.id, name: atlas.name, rawName: "atlas" }],
             taskSummary: `上一步 agent "${opts.agentId}" 输出未通过 schema 校验（期望 ${requiredSchema}），请评估后决定下一步：换人、调整任务描述、或告知用户`,
-            requiredOutputSchema: "decision_block",
+            requiredOutputSchema: "answer_text",
             failurePolicy: { onInvalidOutput: "escalate" as const, onTimeout: "fallback_echo" as const, maxRetries: 0 },
             provenance: { parentAgent: opts.agentId, parentMessageId: id },
           });

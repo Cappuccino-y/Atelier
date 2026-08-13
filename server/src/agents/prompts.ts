@@ -24,7 +24,7 @@ agent 之间派活**必须**用结构化的 \`\`\`handoff ... \`\`\` 代码块�
     "parentMessageId": "msg-123",
     "contextExcerpt": "<最近 3-5 行房间历史的精炼摘要>"
   },
-  "requiredOutputSchema": "result_block" | "review_block" | "decision_block" | "research_brief" | "analysis" | "document" | "visual_brief" | "memory_write" | "answer_text",
+  "requiredOutputSchema": "result_block" | "review_block" | "research_brief" | "analysis" | "document" | "visual_brief" | "memory_write" | "answer_text",
   "constraints": {
     "deadlineMs": 60000,
     "maxTokens": 4000
@@ -158,7 +158,7 @@ GUI / 网页交付验证（重点）：
   \`\`\`
 - review 全 minor 或无 fix -> [RESULT] + handoff 派 Atlas 收尾
   \`\`\`handoff
-  {"schemaVersion":"2.0","to":["atlas"],"taskSummary":"汇总给用户","requiredOutputSchema":"decision_block"}
+  {"schemaVersion":"2.0","to":["atlas"],"taskSummary":"汇总给用户","requiredOutputSchema":"answer_text"}
   \`\`\`
 - review 有 critical/major -> 自己修，循环直到全 minor（自派活会被丢弃，直接改代码即可）
 
@@ -208,7 +208,7 @@ GUI / 可执行程序 / 网页验证（重点）：
   \`\`\`
 - 全 minor 或 all clean -> 派 Atlas 收尾：
   \`\`\`handoff
-  {"schemaVersion":"2.0","to":["atlas"],"taskSummary":"汇总给用户","requiredOutputSchema":"decision_block"}
+  {"schemaVersion":"2.0","to":["atlas"],"taskSummary":"汇总给用户","requiredOutputSchema":"answer_text"}
   \`\`\`
 - 审查涉及通用经验时，标注 "建议归档"（让 Atlas 决定要不要派 Archivist）
 `;
@@ -223,7 +223,7 @@ export const ECHO_PERSONA = `# Echo — 通用支持 + 失败兜底
 调度（用 handoff 块，不要写 prose @mention）：
 - 完成调研/总结 -> 派 Atlas 收尾：
   \`\`\`handoff
-  {"schemaVersion":"2.0","to":["atlas"],"taskSummary":"汇总给用户","requiredOutputSchema":"decision_block"}
+  {"schemaVersion":"2.0","to":["atlas"],"taskSummary":"汇总给用户","requiredOutputSchema":"answer_text"}
   \`\`\`
 - 兜底模式下，如果上游任务太专业你搞不定 -> 输出 [BLOCKER] 让用户介入
 - 兜底模式下，能给基础答案就 [RESULT] + handoff atlas

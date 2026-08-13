@@ -392,7 +392,13 @@ export function formatHandoffTaskTrailer(directive: HandoffDirectiveV2): string 
  */
 export function validateOutputAgainstSchema(content: string, required?: OutputSchema): boolean {
   if (!required) return true;
-  if (required === "answer_text") return content.trim().length > 0;
+  // decision_block is treated as answer_text — the orchestrator's "decision"
+  // is expressed by either a ```handoff``` block (dispatch) or a prose
+  // summary (reply), NOT by a mandatory [DECISION] tag. Requiring both the
+  // tag and the handoff was a "specification ambiguity" failure (MAST
+  // taxonomy) — agents produced one but not the other and the chain died.
+  // Any non-empty reply satisfies the orchestrator's contract.
+  if (required === "answer_text" || required === "decision_block") return content.trim().length > 0;
   const expectedTag = OUTPUT_SCHEMA_TO_TAG[required];
   if (!expectedTag) return true;
   // Allow either [TAG] or [TAG:DEPRECATE] — a deprecation block is still
