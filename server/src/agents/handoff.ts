@@ -167,6 +167,62 @@ export type AgentLocator = (raw: string) => { id: string; name: string } | null;
 export const HANDOFF_RE = /```handoff\s*\n([\s\S]*?)```/;
 
 /**
+ * Extract the JSON payload from a ```handoff``` block using a
+ * brace-balanced scan instead of a naive fence match.
+ *
+ * Why: LLMs frequently embed ``` code fences inside `taskSummary` (e.g. a
+ * .gitignore snippet). A non-greedy fence regex then truncates the block at
+ * the INNER fence, orphaning the `to` field and corrupting the JSON. This
+ * scanner finds the outermost `{ ... }` object and ignores fences that sit
+ * inside string literals, so nested code blocks in string fields don't
+ * break the handoff.
+ *
+ * Returns the raw JSON string (without surrounding whitespace) or null.
+ */
+function extractHandoffJson(content: string): string | null {
+  const open = content.indexOf("```handoff");
+  if (open === -1) return null;
+  const braceStart = content.indexOf("{", open);
+  if (braceStart === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = braceStart; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (ch === '"') { inString = false; continue; }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return content.slice(braceStart, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort repair for a JSON string that fails strict parse. Handles
+ * the two most common LLM drift patterns: trailing commas and trailing
+ * prose / unclosed fences after the object. Returns the repaired string,
+ * or the original if no repair applies.
+ */
+function repairJson(raw: string): string | null {
+  const trimmed = raw.trim();
+  // Strip trailing ``` fence if the object ended early but a fence got
+  // appended by the model.
+  let candidate = trimmed.replace(/```\s*$/, "").trim();
+  // Remove trailing commas before } or ] — the #1 malformed-JSON drift.
+  candidate = candidate.replace(/,\s*([}\]])/g, "$1");
+  return candidate;
+}
+
+/**
  * Parse an agent's reply for a handoff block. Accepts both v1 and v2.
  * Returns null if no block found, or a HandoffDirectiveV2 if the block
  * parses + resolves to at least one known agent.
@@ -176,14 +232,22 @@ export const HANDOFF_RE = /```handoff\s*\n([\s\S]*?)```/;
  * from the display content by stripHandoff).
  */
 export function parseHandoff(content: string, locator: AgentLocator): HandoffDirectiveV2 | null {
-  const m = content.match(HANDOFF_RE);
-  if (!m) return null;
+  const jsonStr = extractHandoffJson(content);
+  if (!jsonStr) return null;
 
   let raw: unknown;
   try {
-    raw = JSON.parse(m[1].trim());
+    raw = JSON.parse(jsonStr);
   } catch {
-    return null;
+    // First attempt: strict parse on the balanced brace substring failed —
+    // try a repair pass (strip trailing fence, drop trailing commas).
+    const repaired = repairJson(jsonStr);
+    if (!repaired || repaired === jsonStr) return null;
+    try {
+      raw = JSON.parse(repaired);
+    } catch {
+      return null;
+    }
   }
   if (!raw || typeof raw !== "object") return null;
 
@@ -274,11 +338,23 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
 }
 
 /**
- * Strip the handoff block for display purposes. Same as the old
- * triggers.stripHandoff but kept here so it can be reused outside triggers.
+ * Strip the handoff block for display purposes. Uses the same
+ * brace-balanced scan as parseHandoff so a handoff whose taskSummary
+ * contains nested code fences is still fully stripped from the display
+ * (otherwise the orphaned inner fence + JSON tail leak into the UI).
  */
 export function stripHandoffBlock(content: string): string {
-  return content.replace(HANDOFF_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  const open = content.indexOf("```handoff");
+  if (open === -1) return content.replace(/\n{3,}/g, "\n\n").trim();
+  const jsonStr = extractHandoffJson(content);
+  // Remove from ```handoff up to the closing ``` that follows the JSON.
+  // Find the fence after the JSON end.
+  const jsonEnd = jsonStr ? content.indexOf(jsonStr) + jsonStr.length : open;
+  const closeFence = content.indexOf("```", jsonEnd);
+  const end = closeFence === -1 ? content.length : closeFence + 3;
+  const before = content.slice(0, open);
+  const after = content.slice(end);
+  return (before + after).replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**

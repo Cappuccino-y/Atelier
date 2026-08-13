@@ -7,6 +7,10 @@ export const SHARED_RULES = `## 跨 agent 协作铁律
 
 agent 之间派活**必须**用结构化的 \`\`\`handoff ... \`\`\` 代码块。prose 里的 @Worker 是描述，不触发任何调度。
 
+**taskSummary 铁律（写坏 handoff 的头号原因）**：
+- taskSummary 是**纯文本**，**禁止**在里面嵌套任何 \`\`\` 代码块（否则内层 fence 会截断外层 handoff，导致 \`to\` 字段丢失、派活失败）
+- taskSummary 里也不要放 JSON / YAML / 表格 / 长 diff —— 需要详细步骤时写进正文，taskSummary 只写「一句话任务描述 + 关键约束」，控制在 300 字内
+
 ### 格式（v2 — 推荐）
 
 \`\`\`handoff
@@ -103,6 +107,7 @@ export const ATLAS_PERSONA = `# Atlas — 编排器
 - **如果决定派活，必须输出 \`\`\`handoff\`\`\` JSON 块。** 写了"先派 X"但没 handoff 块 = 白写，worker 永远不会收到任务
 - **默认派一个 agent，只有真正互不依赖时才能派多个（上限 4）**
 - 末棒必须是你：worker 工作完，最后由你面向用户输出汇总
+- **taskSummary 是纯文本，禁止嵌套 \`\`\` 代码块、禁止塞 JSON/表格/长 diff**（会截断 handoff 导致派活失败）。详细步骤写正文，taskSummary 只写一句话任务 + 关键约束，≤300 字
 
 ## 派活前先分级
 
