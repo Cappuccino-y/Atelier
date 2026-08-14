@@ -170,7 +170,7 @@ export function RoomHeader({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              onClick={onDelete}
+              onClick={() => onDelete()}
               className="text-[12px] text-red-600 focus:text-red-700"
             >
               <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete room

@@ -38,6 +38,8 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [currentRoomId, setCurrentRoomId] = useState<string | undefined>();
+  const [roomLoading, setRoomLoading] = useState(false);
+  const [roomLoadError, setRoomLoadError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
@@ -50,10 +52,12 @@ export default function App() {
 
   // rAF-batched streaming buffers: WS events arrive faster than 60fps and we
   // don't want to thrash React. Accumulate deltas in refs and flush per frame.
+  // Both callbacks are useCallback-stable (only depend on setters) so the WS
+  // subscription effect below never re-binds on streaming re-renders.
   const streamBufferRef = useRef<Record<string, string>>({});
   const streamToolRef = useRef<Record<string, string | null>>({});
   const rafIdRef = useRef<number | null>(null);
-  const flushStream = () => {
+  const flushStream = useCallback(() => {
     rafIdRef.current = null;
     const txt = streamBufferRef.current;
     const tl = streamToolRef.current;
@@ -75,11 +79,11 @@ export default function App() {
     });
     streamBufferRef.current = {};
     streamToolRef.current = {};
-  };
-  const scheduleFlush = () => {
+  }, []);
+  const scheduleFlush = useCallback(() => {
     if (rafIdRef.current !== null) return;
     rafIdRef.current = requestAnimationFrame(flushStream);
-  };
+  }, [flushStream]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -160,6 +164,14 @@ export default function App() {
   useEffect(() => {
     if (!currentRoomId) return;
     let cancelled = false;
+    // Clear stale room content immediately so we never show the previous
+    // room's messages under the new room's header while data loads.
+    setMessages([]);
+    setTasks([]);
+    setEvents([]);
+    setMemoryEntries([]);
+    setRoomLoading(true);
+    setRoomLoadError(null);
     (async () => {
       try {
         const [msgs, tks, evs] = await Promise.all([
@@ -173,6 +185,7 @@ export default function App() {
         setEvents(evs);
       } catch (err) {
         atchDebug.warn("app", "room load failed", { roomId: currentRoomId, error: String(err) });
+        if (!cancelled) setRoomLoadError(err instanceof Error ? err.message : String(err));
       }
       // fetch memory separately (can be slow)
       try {
@@ -191,6 +204,7 @@ export default function App() {
           });
         }
       } catch { /* no persisted activities */ }
+      if (!cancelled) setRoomLoading(false);
     })();
     return () => { cancelled = true; };
   }, [currentRoomId]);
@@ -254,7 +268,15 @@ export default function App() {
           break;
         }
         case "project.updated": {
-          api.listProjects().then(setProjects).catch(() => {});
+          const p = payload as Project & { deleted?: boolean };
+          if (p.deleted) {
+            setProjects(curr => curr.filter(x => x.id !== p.id));
+          } else {
+            setProjects(curr => {
+              const exists = curr.some(x => x.id === p.id);
+              return exists ? curr.map(x => x.id === p.id ? p : x) : [...curr, p];
+            });
+          }
           break;
         }
         case "agent.created":
@@ -286,7 +308,7 @@ export default function App() {
         case "agent.tool_call": {
           const p = payload as { roomId: string; agentId: string; tool: string };
           if (p.roomId === currentRoomId && p.agentId) {
-            streamToolRef.current[p.agentId] = p.tool;
+            streamToolRef.current[`${p.roomId}:${p.agentId}`] = p.tool;
             scheduleFlush();
           }
           pushActivity({
@@ -301,7 +323,8 @@ export default function App() {
         case "agent.text_delta": {
           const p = payload as { roomId: string; agentId: string; delta: string };
           if (p.roomId === currentRoomId && p.agentId) {
-            streamBufferRef.current[p.agentId] = (streamBufferRef.current[p.agentId] ?? "") + p.delta;
+            const key = `${p.roomId}:${p.agentId}`;
+            streamBufferRef.current[key] = (streamBufferRef.current[key] ?? "") + p.delta;
             scheduleFlush();
           }
           break;
@@ -333,19 +356,20 @@ export default function App() {
             if (next[p.roomId] === p.agentId) delete next[p.roomId];
             return next;
           });
-          if (activeRunId && p.runId === activeRunId) setActiveRunId(undefined);
+          setActiveRunId(curr => (curr && p.runId === curr) ? undefined : curr);
           // clear streaming buffers immediately (not via rAF) so no stale delta
           // leaks into a future run by the same agent.
-          delete streamBufferRef.current[p.agentId];
-          delete streamToolRef.current[p.agentId];
+          const streamKey = `${p.roomId}:${p.agentId}`;
+          delete streamBufferRef.current[streamKey];
+          delete streamToolRef.current[streamKey];
           setStreamingText(curr => {
             const next = { ...curr };
-            delete next[p.agentId];
+            delete next[streamKey];
             return next;
           });
           setStreamingTool(curr => {
             const next = { ...curr };
-            delete next[p.agentId];
+            delete next[streamKey];
             return next;
           });
           pushActivity({
@@ -365,16 +389,17 @@ export default function App() {
             return next;
           });
           setActiveRunId(undefined);
-          delete streamBufferRef.current[p.agentId];
-          delete streamToolRef.current[p.agentId];
+          const streamKey = `${p.roomId}:${p.agentId}`;
+          delete streamBufferRef.current[streamKey];
+          delete streamToolRef.current[streamKey];
           setStreamingText(curr => {
             const next = { ...curr };
-            delete next[p.agentId];
+            delete next[streamKey];
             return next;
           });
           setStreamingTool(curr => {
             const next = { ...curr };
-            delete next[p.agentId];
+            delete next[streamKey];
             return next;
           });
           pushActivity({
@@ -402,18 +427,6 @@ export default function App() {
           else if (event === "system.error") toast.error(p.error ?? "error", p);
           break;
         }
-        case "project.updated": {
-          const p = payload as Project & { deleted?: boolean };
-          if (p.deleted) {
-            setProjects(curr => curr.filter(x => x.id !== p.id));
-          } else {
-            setProjects(curr => {
-              const exists = curr.some(x => x.id === p.id);
-              return exists ? curr.map(x => x.id === p.id ? p : x) : [...curr, p];
-            });
-          }
-          break;
-        }
         case "self_talk.start":
         case "self_talk.stop":
         case "escalation":
@@ -427,7 +440,7 @@ export default function App() {
       }
     });
     return unsub;
-  }, [currentRoomId, streamingAgentMap, activeRunId, pushActivity, scheduleFlush]);
+  }, [currentRoomId, pushActivity, scheduleFlush]);
 
   // Handlers
   const handleCreateRoom = useCallback(async (body: { name: string; topic: string; projectId?: string }) => {
@@ -444,12 +457,13 @@ export default function App() {
     }
   }, []);
 
-  const handleSendMessage = useCallback(async (content: string, _mentionedIds: string[]) => {
+  const handleSendMessage = useCallback(async (content: string, mentionedIds: string[]) => {
     if (!currentRoomId) return;
     try {
-      await api.sendMessage(currentRoomId, { content });
+      await api.sendMessage(currentRoomId, { content, mentionedAgentIds: mentionedIds });
     } catch (err) {
       atchDebug.error("app", "send message failed", { error: String(err) });
+      toast.error("Failed to send message", { detail: String(err) });
     }
   }, [currentRoomId]);
 
@@ -460,22 +474,31 @@ export default function App() {
       description: "This will delete all messages in this room.",
       destructive: true,
       onConfirm: async () => {
-        await api.clearRoomMessages(currentRoomId);
-        setMessages([]);
-        toast.info("Messages cleared");
+        try {
+          await api.clearRoomMessages(currentRoomId);
+          setMessages([]);
+          toast.info("Messages cleared");
+        } catch (err) {
+          toast.error("Failed to clear messages", { detail: String(err) });
+        }
       },
     });
   }, [currentRoomId]);
 
-  const handleDeleteRoom = useCallback(() => {
-    if (!currentRoomId) return;
+  const handleDeleteRoom = useCallback((roomId?: string) => {
+    const target = roomId ?? currentRoomId;
+    if (!target) return;
     setConfirm({
       title: "Delete room?",
       description: "This will permanently delete this room and all its data.",
       destructive: true,
       onConfirm: async () => {
-        await api.deleteRoom(currentRoomId);
-        setCurrentRoomId(undefined);
+        try {
+          await api.deleteRoom(target);
+          if (currentRoomId === target) setCurrentRoomId(undefined);
+        } catch (err) {
+          toast.error("Failed to delete room", { detail: String(err) });
+        }
       },
     });
   }, [currentRoomId]);
@@ -494,7 +517,11 @@ export default function App() {
       description: "All rooms in this group and their data will be permanently deleted.",
       destructive: true,
       onConfirm: async () => {
-        await api.deleteProject(id);
+        try {
+          await api.deleteProject(id);
+        } catch (err) {
+          toast.error("Failed to delete group", { detail: String(err) });
+        }
       },
     });
   }, []);
@@ -510,26 +537,46 @@ export default function App() {
 
   const handleSaveRoom = useCallback(async (patch: Partial<Room>) => {
     if (!currentRoomId) return;
-    const updated = await api.updateRoom(currentRoomId, patch);
-    setRooms(curr => curr.map(r => r.id === updated.id ? updated : r));
+    try {
+      const updated = await api.updateRoom(currentRoomId, patch);
+      setRooms(curr => curr.map(r => r.id === updated.id ? updated : r));
+    } catch (err) {
+      toast.error("Failed to save room settings", { detail: String(err) });
+    }
   }, [currentRoomId]);
 
   const handleCreateTask = useCallback(async (title: string) => {
     if (!currentRoomId) return;
-    await api.createTask(currentRoomId, { title });
+    try {
+      await api.createTask(currentRoomId, { title });
+    } catch (err) {
+      toast.error("Failed to create task", { detail: String(err) });
+    }
   }, [currentRoomId]);
 
   const handleUpdateTask = useCallback(async (id: string, patch: Partial<Task>) => {
-    await api.updateTask(id, patch);
+    try {
+      await api.updateTask(id, patch);
+    } catch (err) {
+      toast.error("Failed to update task", { detail: String(err) });
+    }
   }, []);
 
   const handleDeleteTask = useCallback(async (id: string) => {
-    await api.deleteTask(id);
+    try {
+      await api.deleteTask(id);
+    } catch (err) {
+      toast.error("Failed to delete task", { detail: String(err) });
+    }
   }, []);
 
   const handleSaveNotes = useCallback(async (notes: string) => {
     if (!currentRoomId) return;
-    await api.updateRoom(currentRoomId, { notes });
+    try {
+      await api.updateRoom(currentRoomId, { notes });
+    } catch (err) {
+      toast.error("Failed to save notes", { detail: String(err) });
+    }
   }, [currentRoomId]);
 
   const handleReview = useCallback(async () => {
@@ -647,6 +694,8 @@ export default function App() {
         projects={projects}
         agents={agents}
         currentRoom={currentRoom}
+        roomLoading={roomLoading}
+        roomLoadError={roomLoadError}
         messages={messages}
         streamingText={streamingText}
         streamingTool={streamingTool}

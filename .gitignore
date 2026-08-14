@@ -1,4 +1,4 @@
-# Dependencies
+﻿# Dependencies
 node_modules/
 */node_modules/
 
@@ -39,6 +39,7 @@ server/agent-models.json
 __pycache__/
 *.pyc
 .venv/
+.venv-*/
 venv/
 server/*.py
 server/games/
@@ -58,3 +59,7 @@ hello_world.exe
 coverage/
 .cache/
 .turbo/
+
+# Agent workspace (generated files/projects per room)
+out/
+

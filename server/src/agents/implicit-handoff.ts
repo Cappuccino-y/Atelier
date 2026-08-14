@@ -28,13 +28,19 @@ export function buildEchoFallback(opts: {
   parentContent: string;
   expectedSchema: OutputSchema;
   originalTaskSummary?: string;
+  /** "schema" (invalid output) or "timeout" (run failure) — drives wording */
+  failureType?: "schema" | "timeout";
 }): HandoffDirectiveV2 {
   const truncated = opts.parentContent.length > 1500
     ? opts.parentContent.slice(0, 1500) + "..."
     : opts.parentContent;
+  const cause =
+    opts.failureType === "timeout"
+      ? "运行超时/进程失败，未产出有效输出"
+      : `未能产出 requiredOutputSchema="${opts.expectedSchema}" 的有效输出`;
   const fallbackSummary =
     `兜底接管: 上游 agent "${opts.from}" 在 handoff chain ` +
-    `(traceId=${opts.parentTraceId}) 中未能产出 requiredOutputSchema="${opts.expectedSchema}" 的有效输出。` +
+    `(traceId=${opts.parentTraceId}) 中${cause}。` +
     (opts.originalTaskSummary ? `\n\n原任务: ${opts.originalTaskSummary}` : "") +
     `\n\n请接管这个任务，按"${opts.expectedSchema}"要求产出回复。若信息不足无法处理，输出 [BLOCKER] 让用户介入。`;
 

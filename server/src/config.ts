@@ -80,6 +80,13 @@ export const config = {
   opencodeModel: _envOpencodeModel,
   opencodeTimeout: parseInt(process.env.OPENCODE_TIMEOUT ?? "21600000", 10),
   opencodeHandoffDepth: parseInt(process.env.OPENCODE_HANDOFF_DEPTH ?? "50", 10),
+  /**
+   * Root directory where agents do their work. Every agent run is pinned to
+   * <out>/rooms/<roomId>/ so generated files/projects stay OUT of the repo
+   * tree (and rooms don't clobber each other). Override with AGENT_WORKSPACE
+   * (e.g. a path outside the repo entirely).
+   */
+  agentWorkspace: resolve(process.env.AGENT_WORKSPACE || join(process.cwd(), "..", "out")),
   agentMapping: parseMapping(process.env.AGENT_MAPPING ?? "atlas:atlas,forge:build,lens:lens,echo:echo,trainer:trainer,scout:scout,analyst:analyst,writer:writer,archivist:archivist"),
   proserpinaUrl: process.env.PROSERPINA_URL ?? "http://127.0.0.1:8765",
   dbPath: process.env.DB_PATH ?? "./data/atelier.db",

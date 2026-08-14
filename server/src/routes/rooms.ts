@@ -20,8 +20,12 @@ export async function routes(app: FastifyInstance) {
     if (!name) return reply.code(400).send({ error: "name required" });
     const id = nanoid();
     const now = Date.now();
+    // New rooms default to ALL agents as members (atlas/forge/lens/echo/
+    // trainer/scout/analyst/writer/archivist). Agents invoked later via
+    // @mention or handoff are auto-added by ensureAgentsInRoom regardless.
+    const allAgentIds = (db.prepare("SELECT id FROM agents WHERE id != 'user' ORDER BY name").all() as Array<{ id: string }>).map(a => a.id);
     db.prepare(`INSERT INTO rooms (id, name, topic, status, unread, last_activity, agent_ids, created_at, project_id) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`)
-      .run(id, name, topic ?? "", "active", now, JSON.stringify(["atlas","forge","lens","echo"]), now, projectId ?? null);
+      .run(id, name, topic ?? "", "active", now, JSON.stringify(allAgentIds), now, projectId ?? null);
     const row = db.prepare("SELECT * FROM rooms WHERE id = ?").get(id) as any;
     sendAll("room.created", normalizeRoom(row));
     return normalizeRoom(row);

@@ -1,8 +1,9 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
+import { debugLog } from "./debug.js";
 
 export type AgentEvent =
   | { type: "step_start"; step: string }
@@ -23,6 +24,8 @@ export type AgentRunOptions = {
   signal?: AbortSignal;
   /** registry key for killRun() — caller should generate (e.g. nanoid) */
   runId?: string;
+  /** roomId for stop-by-room lookups (alias registry) */
+  roomId?: string;
 };
 
 export type AgentRunResult = {
@@ -80,7 +83,17 @@ function runRealAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     writeFileSync(promptFile, opts.prompt, "utf8");
 
     const model = opts.model ?? config.opencodeModel;
-    const cwd = opts.cwd ?? process.cwd();
+    // Pin every agent run to <workspace>/rooms/<roomId>/ — generated files
+    // and projects stay out of the repo tree, and concurrent rooms get
+    // isolated working directories. Falls back to the repo root for runs
+    // without a room (shouldn't happen in practice).
+    let cwd: string;
+    if (opts.roomId) {
+      cwd = join(config.agentWorkspace, "rooms", opts.roomId);
+      try { mkdirSync(cwd, { recursive: true }); } catch {}
+    } else {
+      cwd = opts.cwd ?? process.cwd();
+    }
     const timeoutMs = opts.timeoutMs ?? config.opencodeTimeout;
 
     const batContent = `@echo off
@@ -88,6 +101,15 @@ chcp 65001 >nul
 type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "${model}" --dir "${cwd}" --format json
 `;
     writeFileSync(batFile, batContent, "utf8");
+
+    debugLog("opencode-cmd", undefined, opts.agentName, "spawning opencode", {
+      opencodeAgent: opts.opencodeAgent,
+      model,
+      cwd,
+      timeoutMs,
+      cmd: batContent.trim().split("\n").pop(),
+      runId: opts.runId,
+    });
 
     let stdout = "";
     let stderr = "";
@@ -99,11 +121,39 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       cwd,
       env: { ...process.env },
     });
-    if (opts.runId) registerRun(opts.runId, child);
+    if (opts.runId) {
+      const runId = opts.runId;
+      registerRun(runId, child);
+      const keys: string[] = [opts.agentName];
+      if (opts.roomId) keys.unshift(`${opts.roomId}:${opts.agentName}`);
+      registerRunAliases(runId, keys);
+      child.once("close", () => unregisterRunAliases(runId, keys));
+    }
 
     const timer = setTimeout(() => {
       killed = true;
       killTree(child);
+      // Kill-tree backstop: if taskkill /T fails (zombie, permissions), the
+      // child's 'close' never fires and the promise would hang forever,
+      // leaking the (room, agent) slot and queueing every later task for
+      // this agent. Resolve with a timeout error regardless.
+      killBackstopTimer = setTimeout(() => {
+        if (!closed) {
+          debugLog("opencode-backstop", opts.roomId, opts.agentName, "kill-tree backstop fired — forcing resolve", {
+            runId: opts.runId,
+          });
+          closed = true;
+          try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+          const partial = parseOpenCodeOutput(stdout);
+          resolve({
+            content: partial.content,
+            success: false,
+            error: `timeout after ${timeoutMs}ms (process could not be terminated cleanly)`,
+            rawEvents: partial.rawEvents,
+          });
+        }
+      }, 10_000);
+      killBackstopTimer.unref?.();
     }, timeoutMs);
 
     // external abort (Stop button)
@@ -115,6 +165,15 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       if (opts.signal.aborted) onAbort();
       else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
+
+    let closed = false;
+    let killBackstopTimer: NodeJS.Timeout | undefined;
+    const settleClose = () => {
+      if (killBackstopTimer) clearTimeout(killBackstopTimer);
+      closed = true;
+      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    };
 
     const emit = opts.onEvent;
 
@@ -181,8 +240,7 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
-      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      settleClose();
 
       // flush any leftover JSON objects in the buffer
       {
@@ -198,6 +256,12 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
         // JSON and makes the reply look like a crash. Parse it like a
         // normal completion, then mark it cancelled.
         const partial = parseOpenCodeOutput(stdout);
+        debugLog("opencode-close", undefined, opts.agentName, "aborted by user", {
+          code,
+          runId: opts.runId,
+          stdoutBytes: stdout.length,
+          stderrBytes: stderr.length,
+        });
         resolve({
           content: partial.content,
           success: false,
@@ -210,6 +274,12 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       if (killed) {
         // Same reasoning as abort: surface the streamed text, not raw JSON.
         const partial = parseOpenCodeOutput(stdout);
+        debugLog("opencode-close", undefined, opts.agentName, "timeout kill", {
+          code,
+          runId: opts.runId,
+          timeoutMs,
+          stdoutBytes: stdout.length,
+        });
         resolve({
           content: partial.content,
           success: false,
@@ -220,8 +290,25 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       }
 
       const parsed = parseOpenCodeOutput(stdout);
+      debugLog("opencode-close", undefined, opts.agentName, "process closed", {
+        code,
+        runId: opts.runId,
+        success: parsed.success,
+        stdoutBytes: stdout.length,
+        stderrBytes: stderr.length,
+        stderrHead: stderr.slice(0, 500),
+        contentLen: parsed.content.length,
+      });
       if (parsed.success) {
         resolve(parsed);
+      } else if (code === 0 && parsed.content.length === 0 && !parsed.error) {
+        // Exit 0 + zero content: the model returned nothing (empty completion,
+        // upstream API hiccup). "exit code 0" is a lie here — say what happened.
+        resolve({
+          content: "",
+          success: false,
+          error: `model returned no output (opencode exited 0, ${stdout.length} bytes stdout, ${stderr.length} bytes stderr)`,
+        });
       } else {
         resolve({
           content: parsed.content || stderr || "(no output)",
@@ -233,8 +320,7 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
-      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      settleClose();
       resolve({ content: "", success: false, error: err.message });
     });
   });
@@ -366,10 +452,28 @@ export function consumeJsonObjects(buf: string): { consumed: number; objects: an
 /* ---- registry for cross-process cancellation ----------------------------- */
 
 const activeChildren = new Map<string, ChildProcess>();
+/** roomKey (`roomId:agentId` or bare `agentId`) → runId, for stop-by-room-agent */
+const activeByRoomAgent = new Map<string, string>();
 
 export function registerRun(runId: string, child: ChildProcess): void {
   activeChildren.set(runId, child);
   child.once("close", () => activeChildren.delete(runId));
+}
+
+/** Register alternate lookup keys (roomId:agentId, agentId) for the same run
+ *  so /api/agents/stop without a runId can still find and kill it. */
+export function registerRunAliases(runId: string, keys: string[]): void {
+  for (const k of keys) {
+    if (!k) continue;
+    activeByRoomAgent.set(k, runId);
+  }
+}
+
+/** Remove alias keys once the run ends. */
+export function unregisterRunAliases(runId: string, keys: string[]): void {
+  for (const k of keys) {
+    if (activeByRoomAgent.get(k) === runId) activeByRoomAgent.delete(k);
+  }
 }
 
 export function killRun(runId: string): boolean {
@@ -378,6 +482,13 @@ export function killRun(runId: string): boolean {
   killTree(child);
   activeChildren.delete(runId);
   return true;
+}
+
+/** Kill by room/agent key (or any alias) — resolves to a runId first. */
+export function killRunByKey(key: string): boolean {
+  const runId = activeByRoomAgent.get(key);
+  if (!runId) return false;
+  return killRun(runId);
 }
 
 /**

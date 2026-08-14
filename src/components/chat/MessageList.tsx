@@ -9,6 +9,7 @@ import { MessageItem } from "./MessageItem";
 type Props = {
   messages: Message[];
   agents: Agent[];
+  roomId?: string;
   streamingAgent?: Agent | null;
   streamingText?: Record<string, string>;
   streamingTool?: Record<string, string>;
@@ -77,12 +78,16 @@ function StreamingIndicator({ agent, text, tool, onStop }: {
 }
 
 export function MessageList({
-  messages, agents, streamingAgent = null,
+  messages, agents, roomId, streamingAgent = null,
   streamingText = {}, streamingTool = {}, onStopStreaming,
 }: Props) {
   const ref = useRef<VirtuosoHandle>(null);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
   const [atBottom, setAtBottom] = useState(true);
+
+  // Streaming keys are `${roomId}:${agentId}` so parallel rooms never share
+  // or clobber each other's in-flight text (see App.tsx stream buffers).
+  const streamKey = streamingAgent && roomId ? `${roomId}:${streamingAgent.id}` : undefined;
 
   const scrollToBottom = () => {
     if (messages.length === 0) return;
@@ -185,8 +190,8 @@ return (
       {streamingAgent && (
         <StreamingIndicator
           agent={streamingAgent}
-          text={streamingText[streamingAgent.id]}
-          tool={streamingTool[streamingAgent.id]}
+          text={streamKey ? streamingText[streamKey] : undefined}
+          tool={streamKey ? streamingTool[streamKey] : undefined}
           onStop={onStopStreaming}
         />
       )}

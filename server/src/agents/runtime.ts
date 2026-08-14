@@ -8,6 +8,7 @@ import {
   appendMemory,
 } from "./memory.js";
 import { parseMemoryEntry } from "./handoff.js";
+import { debugLog } from "./debug.js";
 
 const HISTORY_LIMIT = 30;
 const OTHER_TRUNCATE = 800;
@@ -170,6 +171,14 @@ export async function invokeAgent(opts: {
   const enriched = enrichForHandoff(opts.roomId, opts.agentId, `${basePrompt}\n\n${opts.prompt}`);
   const ocAgent = config.agentMapping[opts.agentId] ?? opts.agentId;
   const model = resolveAgentModel(opts.agentId);
+  debugLog("invoke", opts.roomId, opts.agentId, "invokeAgent", {
+    model,
+    ocAgent,
+    promptLen: opts.prompt.length,
+    basePromptLen: basePrompt.length,
+    enrichedLen: enriched.length,
+    promptHead: opts.prompt.slice(0, 300),
+  });
   const result = await runOpenCodeAgent({
     agentName: opts.agentId,
     opencodeAgent: ocAgent,
@@ -178,6 +187,13 @@ export async function invokeAgent(opts: {
     onEvent: opts.onEvent,
     signal: opts.signal,
     runId: opts.runId,
+    roomId: opts.roomId,
+  });
+  debugLog("invoke-result", opts.roomId, opts.agentId, "raw agent reply (pre-strip)", {
+    success: result.success,
+    cancelled: result.cancelled,
+    error: result.error,
+    content: result.content,
   });
   return { ...result, enrichedPrompt: enriched };
 }

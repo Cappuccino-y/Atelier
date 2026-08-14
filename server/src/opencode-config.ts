@@ -93,7 +93,12 @@ export function ensureOpencodeAgents(): OpenCodeSyncResult {
   }
   let userConfig: Record<string, unknown>;
   try {
-    userConfig = JSON.parse(readFileSync(OPENCODE_JSON, "utf8"));
+    // Strip UTF-8 BOM — PowerShell/editor saves often add one, and JSON.parse
+    // rejects it, which previously mis-diagnosed a perfectly good file as
+    // "invalid JSON" (backed up + skipped → agents never synced).
+    let raw = readFileSync(OPENCODE_JSON, "utf8");
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+    userConfig = JSON.parse(raw);
   } catch (err) {
     const bak = `${OPENCODE_JSON}.bak`;
     try { copyFileSync(OPENCODE_JSON, bak); } catch { /* ignore */ }

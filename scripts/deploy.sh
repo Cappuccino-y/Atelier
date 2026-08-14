@@ -267,6 +267,25 @@ else
     && ok ".venv ready" || warn "pip install failed — review bridge may be offline"
 fi
 
+# ----- 4b. lens MCP tooling ---------------------------------------------------
+
+head "4b/7  Install lens MCP tooling (playwright + windows-computer-use)"
+
+# @playwright/mcp — global npm package (web screenshots). Windows-only tools
+# (windows-computer-use) are skipped on POSIX.
+if npm ls -g @playwright/mcp >/dev/null 2>&1; then
+  eq "@playwright/mcp already installed globally"
+else
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    say "  -> would run: npm install -g @playwright/mcp"
+  else
+    say "  -> installing @playwright/mcp (global) ..."
+    npm install -g @playwright/mcp >/dev/null 2>&1 \
+      && ok "@playwright/mcp installed" \
+      || warn "@playwright/mcp install failed — lens web screenshots unavailable"
+  fi
+fi
+
 # ----- 5. PATH ----------------------------------------------------------------
 
 head "5/7  Add scripts/ to user PATH"

@@ -47,12 +47,20 @@ export type MemoryScope =
 
 const SCOPE_FILENAME_SEP = "__";
 
+/** Sanitize an untrusted scope segment (roomId/agentId/project name) down to
+ *  [a-zA-Z0-9_-] so LLM-controlled scope strings can never escape MEMORY_DIR
+ *  via path traversal. */
+function sanitizeScopeSegment(raw: string): string {
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return cleaned || "unknown";
+}
+
 function scopeToFilename(scope: MemoryScope): string {
   switch (scope.kind) {
-    case "room":   return `room_${scope.roomId}.md`;
+    case "room":   return `room_${sanitizeScopeSegment(scope.roomId)}.md`;
     case "global": return "global.md";
-    case "project": return `project_${scope.name.replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
-    case "agent":   return `agent_${scope.agentId}.md`;
+    case "project": return `project_${sanitizeScopeSegment(scope.name)}.md`;
+    case "agent":   return `agent_${sanitizeScopeSegment(scope.agentId)}.md`;
   }
 }
 

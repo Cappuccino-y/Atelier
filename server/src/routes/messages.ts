@@ -10,7 +10,7 @@ export async function routes(app: FastifyInstance) {
     return rows.map(normalizeMessage);
   });
 
-  app.post<{ Params: { id: string }; Body: { content: string; authorId?: string } }>("/api/rooms/:id/messages", async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { content: string; authorId?: string; mentionedAgentIds?: string[] } }>("/api/rooms/:id/messages", async (req, reply) => {
     const { content } = req.body;
     const authorId = req.body.authorId ?? "user";
     if (!content || !content.trim()) return reply.code(400).send({ error: "content required" });
@@ -18,7 +18,11 @@ export async function routes(app: FastifyInstance) {
     const id = nanoid();
     const ts = Date.now();
     const tags = extractTags(content);
-    const mentions = extractMentions(content);
+    // Explicit mention list (from the Composer's parsed mentions) wins; fall
+    // back to parsing the text so plain "@Forge hi" still routes correctly.
+    const mentions = Array.isArray(req.body.mentionedAgentIds) && req.body.mentionedAgentIds.length > 0
+      ? req.body.mentionedAgentIds.map((aId) => ({ id: aId, name: aId }))
+      : extractMentions(content);
 
     db.prepare(`INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(id, req.params.id, authorId, content, JSON.stringify(tags), JSON.stringify(mentions.map(m => m.id)), ts);

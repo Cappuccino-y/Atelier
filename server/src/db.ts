@@ -268,6 +268,22 @@ function seedDatabase() {
         message.timestamp,
       );
     }
+
+    // Roster migration: every room should roster all agents except "user".
+    // New rooms do this at creation; this backfills older rooms so the
+    // Agents panel doesn't hide agents that merely weren't seeded.
+    const rosterAgents = agents.filter((a) => a[0] !== "user").map((a) => a[0]);
+    const roomRows = db.prepare("SELECT id, agent_ids FROM rooms").all() as Array<{ id: string; agent_ids: string }>;
+    for (const room of roomRows) {
+      const ids: string[] = JSON.parse(room.agent_ids || "[]");
+      let changed = false;
+      for (const id of rosterAgents) {
+        if (!ids.includes(id)) { ids.push(id); changed = true; }
+      }
+      if (changed) {
+        db.prepare("UPDATE rooms SET agent_ids = ? WHERE id = ?").run(JSON.stringify(ids), room.id);
+      }
+    }
   });
 
   seed();

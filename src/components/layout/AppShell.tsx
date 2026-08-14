@@ -16,6 +16,8 @@ type Props = {
   projects: Project[];
   agents: Agent[];
   currentRoom?: Room;
+  roomLoading?: boolean;
+  roomLoadError?: string | null;
   messages: Message[];
   streamingText: Record<string, string>;
   streamingTool: Record<string, string>;
@@ -32,7 +34,7 @@ type Props = {
   onReview: () => void;
   onExport: () => void;
   onClearRoom: () => void;
-  onDeleteRoom: () => void;
+  onDeleteRoom: (roomId?: string) => void;
   onRoomSettings: () => void;
   onInvite: () => void;
   onCreateTask: (title: string) => void;
@@ -141,6 +143,7 @@ export function AppShell(props: Props) {
                 onInvite={props.onInvite}
               />
               <MessageList
+                roomId={props.currentRoom?.id}
                 messages={allMessages}
                 agents={props.agents}
                 streamingAgent={props.streamingAgent}
@@ -148,6 +151,16 @@ export function AppShell(props: Props) {
                 streamingTool={props.streamingTool}
                 onStopStreaming={props.onStopStreaming}
               />
+              {props.roomLoading && (
+                <div className="px-4 py-2 text-[12px] text-zinc-400 border-t border-zinc-200/80 bg-white">
+                  Loading room data…
+                </div>
+              )}
+              {props.roomLoadError && (
+                <div className="px-4 py-2 text-[12px] text-red-600 border-t border-red-100 bg-red-50">
+                  Failed to load room: {props.roomLoadError}
+                </div>
+              )}
               <Composer agents={props.agents} onSend={props.onSendMessage} />
             </div>
           ) : (

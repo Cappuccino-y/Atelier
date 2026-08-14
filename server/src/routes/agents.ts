@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
-import { killRun } from "../agents/process-agent.js";
+import { killRun, killRunByKey } from "../agents/process-agent.js";
 
 export async function routes(app: FastifyInstance) {
   app.get("/api/agents", async () => {
@@ -26,17 +26,15 @@ export async function routes(app: FastifyInstance) {
 
   app.post<{ Body: { roomId: string; agentId?: string; runId?: string } }>("/api/agents/stop", async (req) => {
     const { roomId, agentId, runId } = req.body ?? ({} as any);
-    // Best-effort: signal abort via the in-memory registry.
-    // Without runId we kill by agentId in that room; if there's exactly one
-    // match we kill it, otherwise the caller must specify runId.
+    // Exact runId first, then room/agent alias keys — both are now registered
+    // for every live run, so a Stop without runId actually works.
     let killed = 0;
     if (runId) {
       if (killRun(runId)) killed = 1;
     } else if (agentId && roomId) {
-      // try common key forms: roomId:agentId + agentId alone
       const candidates = [`${roomId}:${agentId}`, agentId];
       for (const key of candidates) {
-        if (killRun(key)) killed++;
+        if (killRunByKey(key)) killed++;
       }
     } else {
       return { ok: false, error: "roomId + agentId (or runId) required" } as any;

@@ -112,6 +112,13 @@ async function start() {
       }
       if (sync.skipped) {
         app.log.warn(`[opencode-config] skipped: ${sync.skipReason}`);
+        // Surface to the UI — silent skips made users discover missing
+        // agents only after a task already misrouted.
+        setTimeout(() => {
+          import("./broadcast.js").then(({ sendAll }) => {
+            sendAll("system.warning", { reason: "opencode-config-skipped", detail: sync.skipReason });
+          }).catch(() => {});
+        }, 1500);
       }
     } catch (err) {
       app.log.warn({ err }, "[opencode-config] sync failed (non-fatal)");

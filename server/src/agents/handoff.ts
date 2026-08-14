@@ -90,8 +90,28 @@ export const HandoffPayloadV2_1Schema = z.object({
   //                  receiver concludes independently. Sequential intent
   //                  must NEVER be encoded as a multi-target `to` array —
   //                  express it as single-target hops (A → B → C).
-  to: z.array(z.string().min(1)).min(1),
-  taskSummary: z.string().min(1).max(2000),
+  // Accepted forms (LLMs drift between them):
+  //   - string:              "atlas"
+  //   - object:              {"id":"atlas"} / {"name":"Atlas"} /
+  //                          {"id":"atlas","name":"Atlas","rawName":"atlas"} /
+  //                          {"rawName":"atlas"}
+  to: z.array(
+    z.union([
+      z.string().min(1),
+      z.object({
+        id: z.string().min(1).optional(),
+        name: z.string().min(1).optional(),
+        rawName: z.string().min(1).optional(),
+      }).refine((o) => o.id || o.name || o.rawName, { message: "to entry needs id, name or rawName" }),
+    ])
+  ).min(1),
+  // taskSummary: clamp to 2000 chars instead of rejecting — a long task
+  // description is far more common from LLMs than a short one, and dropping
+  // the whole handoff over length is worse than truncating the summary.
+  taskSummary: z.preprocess(
+    (v) => (typeof v === "string" ? v.slice(0, 2000) : v),
+    z.string().min(1).max(2000),
+  ),
   provenance: z.object({
     parentAgent: z.string().optional(),
     parentMessageId: z.string().optional(),
@@ -104,15 +124,26 @@ export const HandoffPayloadV2_1Schema = z.object({
   }).optional(),
   evidenceStandard: EvidenceStandardEnum.optional(),
   failurePolicy: z.object({
-    onInvalidOutput: FailureActionEnum.default("escalate"),
+    // Industry practice: validation failure is usually a transient format
+    // mistake — retry with feedback FIRST (LangChain ToolStrategy, Geodocs
+    // spec: "retry once with violation appended"). escalate is the LAST
+    // resort, not the default.
+    onInvalidOutput: FailureActionEnum.default("retry"),
     onTimeout: FailureActionEnum.default("fallback_echo"),
-    maxRetries: z.number().int().min(0).max(3).default(1),
+    // Clamp instead of reject: models occasionally write maxRetries: 5.
+    maxRetries: z.preprocess((v) => Math.min(Math.max(Number(v) || 0, 0), 3), z.number().int().min(0).max(3)).default(1),
   }).optional(),
-  /** v2.1 only — semantic intent of this handoff (free-text, 1-200 chars). */
-  intent: z.string().min(1).max(200).optional(),
+  /** v2.1 only — semantic intent of this handoff (free-text, clamped to 200 chars). */
+  intent: z.preprocess(
+    (v) => (typeof v === "string" ? v.slice(0, 200) : v),
+    z.string().min(1).max(200).optional(),
+  ),
   /** v2.1 only — references to images / files / message ids downstream
-   *  agents should consult. Free-form strings; server doesn't dereference. */
-  attachmentRefs: z.array(z.string().min(1)).max(20).optional(),
+   *  agents should consult. Clamped to 20 entries instead of rejecting. */
+  attachmentRefs: z.preprocess(
+    (v) => (Array.isArray(v) ? v.slice(0, 20).map((s) => String(s).slice(0, 300)) : v),
+    z.array(z.string().min(1)).max(20).optional(),
+  ),
 });
 
 /** @deprecated use HandoffPayloadV2_1Schema for new code. Kept as alias. */
@@ -207,7 +238,14 @@ function findBalancedJsonObjects(content: string): JsonMatch[] {
         if (depth === 0) { end = j; break; }
       }
     }
-    if (end === -1) break;
+    if (end === -1) {
+      // Unclosed `{` — a markdown code sample or prose with an unbalanced
+      // brace. Skip PAST this brace instead of aborting the whole scan, so a
+      // later well-formed handoff JSON is still found. (The old `break`
+      // silently dropped every valid handoff that came after any code block.)
+      i = start + 1;
+      continue;
+    }
     out.push({ text: content.slice(start, end + 1), start, end: end + 1 });
     i = end + 1;
   }
@@ -216,14 +254,59 @@ function findBalancedJsonObjects(content: string): JsonMatch[] {
 
 /**
  * Best-effort repair for a JSON string that fails strict parse. Handles
- * the most common LLM drift pattern: trailing commas. Returns the repaired
- * string, or the original if no repair applies.
+ * the most common LLM drift patterns:
+ *   1. Trailing commas before } or ]
+ *   2. Illegal escape sequences in strings — e.g. a Windows path like
+ *      `D:\浏览器下载文件\x.yml` where `\浏` is not a valid JSON escape.
+ *      In JSON string context, a backslash followed by anything outside
+ *      `"\/bfnrtu` is invalid; we escape the backslash itself (`\\浏`),
+ *      which preserves the literal path characters.
+ * Returns the repaired string, or null if no repair applies.
  */
 function repairJson(raw: string): string | null {
   const trimmed = raw.trim();
-  // Remove trailing commas before } or ] — the #1 malformed-JSON drift.
-  const candidate = trimmed.replace(/,\s*([}\]])/g, "$1");
-  return candidate === trimmed ? null : candidate;
+  // 1. Remove trailing commas before } or ] — the #1 malformed-JSON drift.
+  const noTrailingCommas = trimmed.replace(/,\s*([}\]])/g, "$1");
+  if (noTrailingCommas !== trimmed) {
+    try { JSON.parse(noTrailingCommas); return noTrailingCommas; } catch { /* fall through */ }
+  }
+  // 2. Repair illegal escapes: walk every string literal and, when a `\` is
+  //    followed by a char outside the JSON escape set, double the backslash.
+  let out = "";
+  let i = 0;
+  let inString = false;
+  let changed = false;
+  while (i < noTrailingCommas.length) {
+    const ch = noTrailingCommas[i];
+    if (!inString) {
+      out += ch;
+      if (ch === '"') inString = true;
+      i++;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = noTrailingCommas[i + 1];
+      if (next === undefined) { out += ch; i++; continue; }
+      if (/["\\/bfnrtu]/.test(next)) {
+        // valid escape — keep as-is
+        out += ch + next;
+        i += 2;
+      } else {
+        // invalid escape — escape the backslash itself
+        out += "\\\\" + next;
+        i += 2;
+        changed = true;
+      }
+      continue;
+    }
+    out += ch;
+    if (ch === '"') inString = false;
+    i++;
+  }
+  if (changed) {
+    try { JSON.parse(out); return out; } catch { /* keep original */ }
+  }
+  return null;
 }
 
 /**
@@ -231,27 +314,33 @@ function repairJson(raw: string): string | null {
  * Scans every brace-balanced object and returns the first one that parses
  * to a recognized handoff shape (v2.1/v2.0/v1). Used by both parseHandoff
  * and stripHandoffBlock so the two stay consistent.
+ *
+ * `text` in the returned match may be REPAIRED (trailing commas / illegal
+ * escapes fixed) — callers must parse `match.text`, not re-scan the raw
+ * content, or the repair is silently undone.
  */
 function locateHandoffJson(content: string): JsonMatch | null {
   for (const match of findBalancedJsonObjects(content)) {
     let raw: unknown;
+    let reparsed = match.text;
     try {
       raw = JSON.parse(match.text);
     } catch {
       const repaired = repairJson(match.text);
       if (!repaired) continue;
       try { raw = JSON.parse(repaired); } catch { continue; }
+      reparsed = repaired;
     }
     if (!raw || typeof raw !== "object") continue;
     const obj = raw as Record<string, unknown>;
     if (obj.schemaVersion === "2.0" || obj.schemaVersion === "2.1") {
-      if (HandoffPayloadV2_1Schema.safeParse(obj).success) return match;
+      if (HandoffPayloadV2_1Schema.safeParse(obj).success) return { ...match, text: reparsed };
       continue;
     }
     // Unknown schemaVersion string (future v3) → reject, don't treat as v1.
     if (typeof obj.schemaVersion === "string") continue;
     // v1 shape (no schemaVersion) with a `to` array.
-    if (HandoffPayloadV1Shape.safeParse(obj).success) return match;
+    if (HandoffPayloadV1Shape.safeParse(obj).success) return { ...match, text: reparsed };
   }
   return null;
 }
@@ -266,8 +355,7 @@ function locateHandoffJson(content: string): JsonMatch | null {
  * reply — no code fence required. If multiple JSON objects are present,
  * the first that matches the handoff schema is used.
  */
-export function parseHandoff(content: string, locator: AgentLocator): HandoffDirectiveV2 | null {
-  const match = locateHandoffJson(content);
+export function parseHandoff(content: string, locator: AgentLocator): HandoffDirectiveV2 | null {  const match = locateHandoffJson(content);
   if (!match) return null;
 
   let raw: unknown;
@@ -334,14 +422,58 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
     rawTraceId: "",   // v1 blocks carry no traceId — nothing to preserve
     to: resolved,
     taskSummary: v1.data.task ?? "",
-    failurePolicy: { onInvalidOutput: "escalate", onTimeout: "fallback_echo", maxRetries: 1 },
+    failurePolicy: { onInvalidOutput: "retry", onTimeout: "fallback_echo", maxRetries: 1 },
   };
+}
+
+/**
+ * Diagnose WHY parseHandoff returned null despite the reply looking like it
+ * contains a handoff. Returns a human-readable reason, or null when the
+ * reply simply has no handoff-shaped JSON at all. Used for logging/UI so a
+ * silently-broken chain is debuggable instead of a mystery.
+ */
+export function diagnoseHandoffFailure(content: string, locator: AgentLocator): string | null {
+  for (const match of findBalancedJsonObjects(content)) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(match.text);
+    } catch {
+      const repaired = repairJson(match.text);
+      if (!repaired) continue;
+      try { raw = JSON.parse(repaired); } catch { continue; }
+    }
+    if (!raw || typeof raw !== "object") continue;
+    const obj = raw as Record<string, unknown>;
+    if (obj.schemaVersion === "2.0" || obj.schemaVersion === "2.1") {
+      const parsed = HandoffPayloadV2_1Schema.safeParse(obj);
+      if (!parsed.success) {
+        const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "root"}: ${i.message}`).slice(0, 4).join("; ");
+        return `handoff-like JSON found but schema rejected — ${issues || "unknown"}`;
+      }
+      const d = resolveV2(parsed.data, locator);
+      if (!d) return "handoff schema OK but none of the targets resolved to a known agent";
+      return null; // actually parses — no failure
+    }
+    if (typeof obj.schemaVersion === "string") {
+      return `unknown schemaVersion "${obj.schemaVersion}"`;
+    }
+    if (HandoffPayloadV1Shape.safeParse(obj).success) {
+      const tos = obj.to as Array<string | { id?: string; name?: string }>;
+      const names = tos.map((t) => (typeof t === "string" ? t : (t.id ?? t.name ?? ""))).filter(Boolean);
+      const unknown = names.filter((n) => !locator(n));
+      if (unknown.length > 0) return `v1 handoff targets not found: ${unknown.join(", ")}`;
+      return null;
+    }
+  }
+  return null;
 }
 
 function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDirectiveV2 | null {
   const seen = new Set<string>();
   const resolved: Array<{ id: string; name: string; rawName: string }> = [];
-  for (const rawName of payload.to) {
+  for (const entry of payload.to) {
+    // Accept both string ("atlas") and object ({id|name|rawName}) forms.
+    const rawName = typeof entry === "string" ? entry : (entry.id ?? entry.name ?? entry.rawName ?? "");
     const agent = locator(rawName);
     if (agent && !seen.has(agent.id)) {
       resolved.push({ id: agent.id, name: agent.name, rawName });
@@ -349,7 +481,7 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
     }
   }
   if (resolved.length === 0) return null;
-  const fp = payload.failurePolicy ?? { onInvalidOutput: "escalate" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };
+  const fp = payload.failurePolicy ?? { onInvalidOutput: "retry" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };
   return {
     schemaVersion: payload.schemaVersion,
     traceId: payload.traceId ?? nanoid(),
@@ -432,20 +564,40 @@ export function formatHandoffTaskTrailer(directive: HandoffDirectiveV2): string 
  * in. Returns true if the output matches (or if no schema was required).
  */
 export function validateOutputAgainstSchema(content: string, required?: OutputSchema): boolean {
-  if (!required) return true;
+  return validateOutputAgainstSchemaDetailed(content, required).ok;
+}
+
+/**
+ * Detailed variant — same rules as validateOutputAgainstSchema, but returns
+ * a human-readable reason so a retry can feed the SPECIFIC failure back to
+ * the model (industry practice: "previous response failed validation: X.
+ * Fix it and respond again" — vague retries waste tokens and rarely
+ * succeed). Callers that only need a boolean should use the cheap wrapper.
+ */
+export function validateOutputAgainstSchemaDetailed(content: string, required?: OutputSchema): { ok: boolean; reason: string | null } {
+  if (!required) return { ok: true, reason: null };
   // decision_block is treated as answer_text — the orchestrator's "decision"
   // is expressed by either a ```handoff``` block (dispatch) or a prose
   // summary (reply), NOT by a mandatory [DECISION] tag. Requiring both the
   // tag and the handoff was a "specification ambiguity" failure (MAST
   // taxonomy) — agents produced one but not the other and the chain died.
   // Any non-empty reply satisfies the orchestrator's contract.
-  if (required === "answer_text" || required === "decision_block") return content.trim().length > 0;
+  if (required === "answer_text" || required === "decision_block")
+    return content.trim().length > 0 ? { ok: true, reason: null } : { ok: false, reason: "reply is empty" };
   const expectedTag = OUTPUT_SCHEMA_TO_TAG[required];
-  if (!expectedTag) return true;
+  if (!expectedTag) return { ok: true, reason: null };
   // Allow either [TAG] or [TAG:DEPRECATE] — a deprecation block is still
   // a valid answer to a memory_write request, etc.
-  const re = new RegExp(`\\[${expectedTag}(:DEPRECATE)?(:\\w+)?\\]`, "i");
-  return re.test(content);
+  const strictRe = new RegExp(`\\[${expectedTag}(:DEPRECATE)?(:\\w+)?\\]`, "i");
+  if (strictRe.test(content)) return { ok: true, reason: null };
+  // Lenient fallback: LLMs occasionally write the schema name or a
+  // prose-ish label instead of the bracketed tag (e.g. `research_brief:` or
+  // `RESEARCH` on its own line). Treat those as satisfied — the tag is a
+  // display marker (SHARED_RULES: "声明 != 产出"), and failing a whole run
+  // over bracket style is worse than a slightly loose check.
+  const lenientRe = new RegExp(`(?:\\[)?(?:${expectedTag}|${required})\\b(?::\\w+)?(?:\\])?`, "i");
+  if (lenientRe.test(content)) return { ok: true, reason: null };
+  return { ok: false, reason: `reply does not contain the required [${expectedTag}] block (requiredOutputSchema="${required}")` };
 }
 
 /**

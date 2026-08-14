@@ -182,6 +182,8 @@ $AgentModelsExample = Join-Path $Root "server\agent-models.example.json"
 $TemplateDir = Join-Path $Root "opencode-config"
 $TemplateAgentsDir = Join-Path $TemplateDir "agents"
 $TemplateAgentsJson = Join-Path $TemplateDir "opencode-agents.template.json"
+$TemplateMcpJson = Join-Path $TemplateDir "opencode-mcp.template.json"
+$WcuVenv = Join-Path $Root "server\.venv-wcu"
 
 # 1a. ~/.config/opencode/agents/*.md
 if (-not $DryRun) {
@@ -298,6 +300,94 @@ if (Test-Path $TemplateAgentsJson) {
   Warn "opencode-agents.template.json not found at $TemplateAgentsJson"
 }
 
+# 1e. merge opencode-mcp.template.json into ~/.config/opencode/opencode.json
+#     (playwright + windows-computer-use, both lens-only). Never overwrite
+#     existing mcp/tools/agent.lens.tools keys the user configured manually.
+if (Test-Path $TemplateMcpJson) {
+  $mcpTemplate = Get-Content -Raw -Path $TemplateMcpJson -Encoding UTF8 -ErrorAction SilentlyContinue | ConvertFrom-Json
+  if (-not $mcpTemplate) {
+    Fail "failed to parse $TemplateMcpJson"
+  } elseif (-not $DryRun) {
+    $userConfig = $null
+    if (Test-Path $OpencodeJson) {
+      try { $userConfig = Get-Content -Raw -Path $OpencodeJson -Encoding UTF8 | ConvertFrom-Json } catch {
+        Warn "could not parse existing $OpencodeJson - backing up and starting fresh"
+        Copy-Item -LiteralPath $OpencodeJson -Destination "$OpencodeJson.bak" -Force
+        $userConfig = $null
+      }
+    }
+    if ($null -ne $userConfig) {
+      $mergedAny = $false
+
+      # mcp.* — only add servers the user hasn't defined
+      if ($mcpTemplate.mcp) {
+        if (-not $userConfig.mcp) { $userConfig | Add-Member -NotePropertyName "mcp" -NotePropertyValue ([pscustomobject]@{}) }
+        foreach ($prop in $mcpTemplate.mcp.PSObject.Properties) {
+          if ($userConfig.mcp.PSObject.Properties.Name -contains $prop.Name) {
+            Say "  [=] mcp.$($prop.Name) already defined — preserved"
+          } else {
+            # Point windows-computer-use at the deploy-managed venv python,
+            # falling back to bare `python` (user's own PATH) if it's missing.
+            $cmd = @($prop.Value.command)
+            if ($prop.Name -eq "windows-computer-use" -and $cmd[0] -eq "python") {
+              $wcuPy = Join-Path $WcuVenv "Scripts\python.exe"
+              $cmd = @($wcuPy) + $cmd[1..($cmd.Count - 1)]
+            }
+            $entry = [pscustomobject]@{ type = $prop.Value.type; command = $cmd; enabled = $prop.Value.enabled }
+            $userConfig.mcp | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $entry
+            $mergedAny = $true
+            Ok "merged mcp.$($prop.Name)"
+          }
+        }
+      }
+
+      # tools.* — global capability disable. Only add globs we don't own yet.
+      if ($mcpTemplate.tools) {
+        if (-not $userConfig.tools) { $userConfig | Add-Member -NotePropertyName "tools" -NotePropertyValue ([pscustomobject]@{}) }
+        foreach ($prop in $mcpTemplate.tools.PSObject.Properties) {
+          if ($userConfig.tools.PSObject.Properties.Name -contains $prop.Name) {
+            Say "  [=] tools.$($prop.Name) already defined — preserved"
+          } else {
+            $userConfig.tools | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
+            $mergedAny = $true
+            Ok "merged tools.$($prop.Name)"
+          }
+        }
+      }
+
+      # agent.lens.tools.* — lens-only capability enable
+      if ($mcpTemplate.agent.lens.tools) {
+        if (-not $userConfig.agent) { $userConfig | Add-Member -NotePropertyName "agent" -NotePropertyValue ([pscustomobject]@{}) }
+        if (-not $userConfig.agent.lens) { $userConfig.agent | Add-Member -NotePropertyName "lens" -NotePropertyValue ([pscustomobject]@{}) }
+        if (-not $userConfig.agent.lens.tools) { $userConfig.agent.lens | Add-Member -NotePropertyName "tools" -NotePropertyValue ([pscustomobject]@{}) }
+        foreach ($prop in $mcpTemplate.agent.lens.tools.PSObject.Properties) {
+          if ($userConfig.agent.lens.tools.PSObject.Properties.Name -contains $prop.Name) {
+            Say "  [=] agent.lens.tools.$($prop.Name) already defined — preserved"
+          } else {
+            $userConfig.agent.lens.tools | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
+            $mergedAny = $true
+            Ok "merged agent.lens.tools.$($prop.Name)"
+          }
+        }
+      }
+
+      if ($mergedAny) {
+        $userConfig.PSObject.Properties | Where-Object { $_.Name -like "_*" } | ForEach-Object { $userConfig.PSObject.Properties.Remove($_.Name) }
+        $userConfig | ConvertTo-Json -Depth 20 | Set-Content -Path $OpencodeJson -Encoding UTF8
+        Ok "opencode.json updated with lens MCP config"
+      } else {
+        Say "  [=] opencode.json MCP config already complete"
+      }
+    } else {
+      Warn "no existing $OpencodeJson — skip MCP merge (run 1d first, then re-run deploy)"
+    }
+  } else {
+    Say "  -> would merge mcp/tools/agent.lens.tools into opencode.json"
+  }
+} else {
+  Warn "opencode-mcp.template.json not found at $TemplateMcpJson"
+}
+
 # ----- 2. create runtime dirs -------------------------------------------------
 
 Head "2/7  Create runtime directories"
@@ -366,6 +456,52 @@ if ($SkipPython) {
       if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1) { Ok ".venv ready" }
       else { Warn "pip install failed (exit $LASTEXITCODE) — review bridge may be offline" }
     } finally { Pop-Location }
+  }
+}
+
+# ----- 4b. install lens MCP tooling (optional but recommended) ---------------
+
+Head "4b/7  Install lens MCP tooling (playwright + windows-computer-use)"
+
+# @playwright/mcp — global npm package (web screenshots via `npx`).
+try {
+  $pw = & npm ls -g @playwright/mcp 2>$null | Select-String -Pattern "@playwright/mcp@" | Select-Object -First 1
+  if ($pw) {
+    Ok "@playwright/mcp already installed globally"
+  } else {
+    if ($DryRun) { Say "  -> would run: npm install -g @playwright/mcp" }
+    else {
+      Say "  -> installing @playwright/mcp (global) ..."
+      & npm install -g @playwright/mcp 2>&1 | Out-Null
+      if ($LASTEXITCODE -eq 0) { Ok "@playwright/mcp installed" }
+      else { Warn "@playwright/mcp install failed — lens web screenshots unavailable" }
+    }
+  }
+} catch {
+  Warn "could not check @playwright/mcp: $_"
+}
+
+# windows-computer-use-mcp — isolated venv at server/.venv-wcu (needs mcp<2,
+# which would clash with the global anaconda mcp 2.x). Same shape as the
+# Proserpina venv above.
+$wcuPyExe = Join-Path $WcuVenv "Scripts\python.exe"
+if (Test-Path $wcuPyExe) {
+  Ok "server\.venv-wcu exists (windows-computer-use ready)"
+} elseif (-not $pythonOk) {
+  Warn "Python not available — skipping windows-computer-use (lens desktop screenshots offline)"
+} else {
+  if ($DryRun) { Say "  -> would create server\.venv-wcu + pip install windows-computer-use" }
+  else {
+    Say "  -> creating server\.venv-wcu and installing windows-computer-use-mcp ..."
+    try {
+      python -m venv $WcuVenv 2>&1 | Out-Null
+      & $wcuPyExe -m pip install --upgrade pip --disable-pip-version-check 2>&1 | Out-Null
+      & $wcuPyExe -m pip install "mcp<2" git+https://github.com/sshh12/windows-computer-use-mcp --disable-pip-version-check 2>&1 | Out-Null
+      if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1) { Ok "server\.venv-wcu ready" }
+      else { Warn "windows-computer-use install failed (exit $LASTEXITCODE) — lens desktop screenshots offline" }
+    } catch {
+      Warn "windows-computer-use venv setup failed: $_"
+    }
   }
 }
 

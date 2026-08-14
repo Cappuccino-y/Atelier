@@ -37,7 +37,7 @@ export const api = {
     request<Room>(`/api/rooms/${roomId}`, { method: "PATCH", body: JSON.stringify({ projectId }) }),
 
   listMessages: (roomId: string) => request<Message[]>(`/api/rooms/${roomId}/messages`),
-  sendMessage: (roomId: string, body: { content: string; authorId?: string }) =>
+  sendMessage: (roomId: string, body: { content: string; authorId?: string; mentionedAgentIds?: string[] }) =>
     request<Message>(`/api/rooms/${roomId}/messages`, {
       method: "POST",
       body: JSON.stringify(body),

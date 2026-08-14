@@ -1,0 +1,27 @@
+{
+  "_comment": "MCP servers registered for Atelier. playwright (web) + windows-computer-use (desktop/screen) are LENS-ONLY: globally disabled via tools, re-enabled only in agent.lens.tools. Merged into ~/.config/opencode/opencode.json by scripts/deploy.ps1 (never overwrites existing keys).",
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp@latest", "--caps=vision"],
+      "enabled": true
+    },
+    "windows-computer-use": {
+      "type": "local",
+      "command": ["python", "-m", "windows_computer_use"],
+      "enabled": true
+    }
+  },
+  "tools": {
+    "playwright*": false,
+    "windows-computer-use*": false
+  },
+  "agent": {
+    "lens": {
+      "tools": {
+        "playwright*": true,
+        "windows-computer-use*": true
+      }
+    }
+  }
+}
