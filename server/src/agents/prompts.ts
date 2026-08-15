@@ -39,15 +39,15 @@ agent 之间派活**必须**在回复里输出一个**裸 JSON 对象**（不用
   }
 }
 
-### 向后兼容 v1（仍支持）
-
-{"to": ["forge"], "task": "实现 selectFrame 兜底路径"}
-
-v1 会被 server 解析时自动补全 schemaVersion=1.0 + 默认 traceId + 默认 failurePolicy。
-
 ### 规则
 
 - **to 数组**：agent name，不区分大小写。**多目标 = 并行 fan-out**（同时派发、无先后顺序，各自独立完成后分别收尾）
+- **不同任务并行**：to 数组的元素可以是对象，每个对象带自己的 taskSummary（和/或 requiredOutputSchema），覆盖共享的：
+  \`\`\`json
+  {"schemaVersion":"2.0","to":[{"name":"forge","taskSummary":"实现","requiredOutputSchema":"result_block"},{"name":"scout","taskSummary":"调研","requiredOutputSchema":"research_brief"}],"taskSummary":"并行探索"}
+  \`\`\`
+  每个并行任务产出不同类型时，务必给每个 to 对象写各自的 requiredOutputSchema，否则共享的 schema 会误判其他人的输出
+- **每次回复只发一个 handoff JSON 对象**：并行永远用 to 数组表达，**绝不发多个独立 JSON 对象**（server 只认第一个，其余会被丢弃）
 - **串行必须单目标**：需要"先 A 再 B"时，to **只填 A**；A 完成后由 A 自行 handoff 派 B（单跳接力）。不要一次填多个表达先后关系 — server 会把多目标全部**并行**执行，顺序意图会丢失
 - **taskSummary** ≤ 2000 字符（旧 task 字段被 taskSummary 取代）
 - **requiredOutputSchema** 决定下游 agent 该输出哪种 tag（强烈建议填）
@@ -57,7 +57,7 @@ v1 会被 server 解析时自动补全 schemaVersion=1.0 + 默认 traceId + 默�
 
 ### 唯一能触发路由的
 
-- agent 回复里的**裸 JSON handoff 对象**（v1 或 v2，带 to 字段）
+- agent 回复里的**裸 JSON handoff 对象**（v2，带 to 字段和 schemaVersion: "2.0"）
 - user 消息里的 @Mention（仅在 user 消息里生效）
 
 ### 失败回退 chain

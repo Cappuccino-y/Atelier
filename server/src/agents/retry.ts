@@ -28,13 +28,25 @@ const MAX_TOTAL_BUDGET_MS = 30_000;
  * @param maxRetries  Max retries allowed (from failurePolicy.maxRetries)
  * @param elapsedMs   Total wall-clock spent in this handoff chain so far
  * @param reason      Why we're considering a retry (for logging)
+ * @param budgetMs    Optional override for MAX_TOTAL_BUDGET_MS. The default
+ *                    30s budget is designed for flaky downstream APIs where
+ *                    a retry should not linger. But for LONG implementation
+ *                    tasks (Forge editing a file for 2-3 min), the elapsed
+ *                    wall-clock includes the agent's legitimate work time —
+ *                    a run that failed after 168s is NOT "budget exhausted",
+ *                    it's a normal-length run that happened to fail. Callers
+ *                    that retry on FORMAT errors (schema-mismatch) should
+ *                    pass Infinity here and rely on maxRetries alone, which
+ *                    is already capped at 3.
  */
 export function decideRetry(opts: {
   attempt: number;
   maxRetries: number;
   elapsedMs: number;
   reason: string;
+  budgetMs?: number;
 }): RetryDecision {
+  const budgetMs = opts.budgetMs ?? MAX_TOTAL_BUDGET_MS;
   if (opts.attempt >= opts.maxRetries) {
     return {
       shouldRetry: false,
@@ -43,12 +55,12 @@ export function decideRetry(opts: {
       reason: `maxRetries exhausted (${opts.attempt}/${opts.maxRetries})`,
     };
   }
-  if (opts.elapsedMs >= MAX_TOTAL_BUDGET_MS) {
+  if (opts.elapsedMs >= budgetMs) {
     return {
       shouldRetry: false,
       delayMs: 0,
       attemptNumber: opts.attempt,
-      reason: `total budget exhausted (${opts.elapsedMs}ms >= ${MAX_TOTAL_BUDGET_MS}ms)`,
+      reason: `total budget exhausted (${opts.elapsedMs}ms >= ${budgetMs}ms)`,
     };
   }
 

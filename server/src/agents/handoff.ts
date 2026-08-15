@@ -17,9 +17,10 @@
  *                       extended-thinking budget levels)
  *   - failurePolicy   — fallback_echo / retry / escalate on invalid output
  *
- * Both v1 and v2 blocks are accepted on the wire. Parsing returns a
- * normalized v2 object (HandoffDirectiveV2) with sensible defaults filled
- * in, so callers don't need to branch on schema version.
+ * Only v2 blocks are accepted on the wire (v1 was retired — it carried no
+ * traceId, breaking retry/dedupe/tracing, and went unused in production).
+ * Parsing returns a normalized v2 object (HandoffDirectiveV2) with sensible
+ * defaults filled in, so callers don't need to branch on schema version.
  */
 
 import { z } from "zod";
@@ -90,11 +91,21 @@ export const HandoffPayloadV2_1Schema = z.object({
   //                  receiver concludes independently. Sequential intent
   //                  must NEVER be encoded as a multi-target `to` array —
   //                  express it as single-target hops (A → B → C).
+  // Per-target tasks: when parallel targets need DIFFERENT tasks (the
+  // common case — e.g. Forge explores local files while Scout researches
+  // online), each object entry can carry its own `taskSummary`, which
+  // overrides the top-level taskSummary for that receiver. This is the
+  // LangGraph Send-style contract: one routing decision, N independent
+  // payloads. Agents must NOT emit multiple separate handoff JSON objects
+  // for parallelism — one handoff with a multi-target `to` array is the
+  // only supported fan-out mechanism.
   // Accepted forms (LLMs drift between them):
   //   - string:              "atlas"
   //   - object:              {"id":"atlas"} / {"name":"Atlas"} /
   //                          {"id":"atlas","name":"Atlas","rawName":"atlas"} /
-  //                          {"rawName":"atlas"}
+  //                          {"rawName":"atlas"} /
+  //                          {"name":"forge","taskSummary":"探索本地材料"} /
+  //                          {"name":"scout","taskSummary":"在线调研"}
   to: z.array(
     z.union([
       z.string().min(1),
@@ -102,6 +113,17 @@ export const HandoffPayloadV2_1Schema = z.object({
         id: z.string().min(1).optional(),
         name: z.string().min(1).optional(),
         rawName: z.string().min(1).optional(),
+        taskSummary: z.preprocess(
+          (v) => (typeof v === "string" ? v.slice(0, 2000) : v),
+          z.string().min(1).max(2000).optional(),
+        ),
+        // Per-target output schema — overrides the shared requiredOutputSchema
+        // for THIS receiver. In a parallel fan-out where each agent produces
+        // a different kind of artifact (Forge: result_block, Lens:
+        // review_block, Scout: research_brief), the shared top-level schema
+        // would wrongly force everyone to the same tag. This lets each
+        // target declare its own.
+        requiredOutputSchema: OutputSchemaEnum.optional(),
       }).refine((o) => o.id || o.name || o.rawName, { message: "to entry needs id, name or rawName" }),
     ])
   ).min(1),
@@ -152,17 +174,6 @@ export const HandoffPayloadV2Schema = HandoffPayloadV2_1Schema;
 export type HandoffPayloadV2 = z.infer<typeof HandoffPayloadV2_1Schema>;
 
 /**
- * Loose v1 parser. We accept the old `{"to": [...], "task": "..."}` shape
- * and coerce it into v2 with defaults. This lets us migrate gradually —
- * existing agents will continue to work, and we can encourage them to
- * upgrade via SHARED_RULES + audits.
- */
-const HandoffPayloadV1Shape = z.object({
-  to: z.array(z.union([z.string(), z.object({ id: z.string().optional(), name: z.string().optional() })])).min(1),
-  task: z.string().optional(),
-});
-
-/**
  * Top-level handoff directive after parsing + resolving agent ids. This
  * is what triggers.ts / runtime.ts consume. It's always v2-shape
  * regardless of what schema the producing agent wrote.
@@ -171,7 +182,17 @@ export type HandoffDirectiveV2 = {
   schemaVersion: "2.0" | "2.1";
   traceId: string;
   rawTraceId: string;          // traceId actually emitted by the agent (may be a UUID or anything)
-  to: Array<{ id: string; name: string; rawName: string }>;
+  to: Array<{
+    id: string;
+    name: string;
+    rawName: string;
+    /** Per-target task. Overrides the shared taskSummary for this receiver
+     *  (parallel fan-out with different tasks per agent). */
+    taskSummary?: string;
+    /** Per-target output schema. Overrides the shared requiredOutputSchema
+     *  for this receiver (parallel fan-out with different artifact types). */
+    requiredOutputSchema?: OutputSchema;
+  }>;
   taskSummary: string;
   provenance?: HandoffPayloadV2["provenance"];
   requiredOutputSchema?: OutputSchema;
@@ -228,8 +249,22 @@ function findBalancedJsonObjects(content: string): JsonMatch[] {
       if (inString) {
         if (escaped) { escaped = false; continue; }
         if (ch === "\\") { escaped = true; continue; }
-        if (ch === '"') { inString = false; continue; }
-        continue;
+    if (ch === '"') {
+      // Bare-quote tolerance: models occasionally write ASCII quotes
+      // INSIDE string values (e.g. `"关停"` instead of `"关停"`), which
+      // would otherwise terminate the string early and break brace
+      // depth tracking. Mirrors repairJson rule 3: a quote is a real
+      // terminator only if what follows (skipping whitespace) is a JSON
+      // structural char (`, ] } : `) or end-of-input. `"性能达标" 4)`
+      // — quote, space, digit — is a bare-quote pair, NOT a terminator.
+      const after = content.slice(j + 1);
+      const firstNonWsMatch = after.match(/\S/);
+      const firstNonWs = firstNonWsMatch ? after[firstNonWsMatch.index!] : undefined;
+      const isTerminator = firstNonWs === undefined || /[,\]\}:]/.test(firstNonWs);
+      if (isTerminator) inString = false;
+      continue;
+    }
+    continue;
       }
       if (ch === '"') { inString = true; continue; }
       if (ch === "{") depth++;
@@ -261,6 +296,13 @@ function findBalancedJsonObjects(content: string): JsonMatch[] {
  *      In JSON string context, a backslash followed by anything outside
  *      `"\/bfnrtu` is invalid; we escape the backslash itself (`\\浏`),
  *      which preserves the literal path characters.
+ *   3. Bare ASCII double quotes INSIDE string values — e.g. a model writing
+ *      `"关停"` with ASCII quotes instead of Chinese quotes `"关停"` in a
+ *      taskSummary. The quote prematurely terminates the string, so the
+ *      JSON.parse error is "Expected ',' or '}' after property value".
+ *      Heuristic: inside a string, a `"` whose NEXT character is not a
+ *      JSON structural char (`, ] } : `, whitespace, or end-of-input) is a
+ *      bare quote and gets escaped as `\"`.
  * Returns the repaired string, or null if no repair applies.
  */
 function repairJson(raw: string): string | null {
@@ -270,8 +312,9 @@ function repairJson(raw: string): string | null {
   if (noTrailingCommas !== trimmed) {
     try { JSON.parse(noTrailingCommas); return noTrailingCommas; } catch { /* fall through */ }
   }
-  // 2. Repair illegal escapes: walk every string literal and, when a `\` is
-  //    followed by a char outside the JSON escape set, double the backslash.
+
+  // Walk every string literal once, fixing BOTH illegal escapes (rule 2)
+  // and bare ASCII quotes (rule 3). Structural chars are copied through.
   let out = "";
   let i = 0;
   let inString = false;
@@ -299,8 +342,27 @@ function repairJson(raw: string): string | null {
       }
       continue;
     }
+    if (ch === '"') {
+      // Decide: string terminator or bare ASCII quote?
+      // A quote is a real terminator only if what follows (skipping
+      // whitespace) is a JSON structural char (`, ] } : `) or end-of-input.
+      // `"性能达标" 4)` — quote, space, digit — is a bare-quote pair.
+      const after = noTrailingCommas.slice(i + 1);
+      const firstNonWsMatch = after.match(/\S/);
+      const firstNonWs = firstNonWsMatch ? after[firstNonWsMatch.index!] : undefined;
+      const isTerminator = firstNonWs === undefined || /[,\]\}:]/.test(firstNonWs);
+      if (isTerminator) {
+        out += ch;
+        inString = false;
+      } else {
+        // Bare quote mid-string (e.g. "关停" with ASCII quotes) — escape it.
+        out += "\\\"";
+        changed = true;
+      }
+      i++;
+      continue;
+    }
     out += ch;
-    if (ch === '"') inString = false;
     i++;
   }
   if (changed) {
@@ -312,7 +374,7 @@ function repairJson(raw: string): string | null {
 /**
  * Find the raw JSON text of the handoff object in the reply, or null.
  * Scans every brace-balanced object and returns the first one that parses
- * to a recognized handoff shape (v2.1/v2.0/v1). Used by both parseHandoff
+ * to a recognized handoff shape (v2.1/v2.0). Used by both parseHandoff
  * and stripHandoffBlock so the two stay consistent.
  *
  * `text` in the returned match may be REPAIRED (trailing commas / illegal
@@ -335,25 +397,29 @@ function locateHandoffJson(content: string): JsonMatch | null {
     const obj = raw as Record<string, unknown>;
     if (obj.schemaVersion === "2.0" || obj.schemaVersion === "2.1") {
       if (HandoffPayloadV2_1Schema.safeParse(obj).success) return { ...match, text: reparsed };
-      continue;
     }
-    // Unknown schemaVersion string (future v3) → reject, don't treat as v1.
-    if (typeof obj.schemaVersion === "string") continue;
-    // v1 shape (no schemaVersion) with a `to` array.
-    if (HandoffPayloadV1Shape.safeParse(obj).success) return { ...match, text: reparsed };
+    // Anything else — no schemaVersion (legacy v1, unsupported), or an
+    // unknown schemaVersion string (future v3) — is rejected, never
+    // treated as a handoff.
   }
   return null;
 }
 
 /**
- * Parse an agent's reply for a handoff. Accepts both v1 and v2, with or
- * without the legacy ```handoff``` code fence. Returns null if no handoff
- * is found, or a HandoffDirectiveV2 if one parses + resolves to at least
- * one known agent.
+ * Parse an agent's reply for a handoff. Accepts v2, with or without the
+ * legacy ```handoff``` code fence. Returns null if no handoff is found, or
+ * a HandoffDirectiveV2 if one parses + resolves to at least one known
+ * agent.
  *
  * The agent may emit the handoff as a bare JSON object anywhere in its
  * reply — no code fence required. If multiple JSON objects are present,
- * the first that matches the handoff schema is used.
+ * the first that matches the handoff schema is used. EXACTLY ONE handoff
+ * per reply is the contract: parallel fan-out is expressed as a
+ * multi-target `to` array (optionally with per-target taskSummary), never
+ * as multiple JSON objects — the first object wins and the rest are
+ * ignored, consistent with OpenAI Swarm ("only the last handoff is used")
+ * and AutoGen's warning that concurrent handoffs cause unexpected
+ * behavior.
  */
 export function parseHandoff(content: string, locator: AgentLocator): HandoffDirectiveV2 | null {  const match = locateHandoffJson(content);
   if (!match) return null;
@@ -383,47 +449,10 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
   }
 
   // Unknown schemaVersion (e.g. a future v3 block) — reject rather than
-  // misparse as v1, which would silently truncate the payload to {to, task}
-  // and misroute the task. Only blocks with NO schemaVersion field are
-  // treated as legacy v1.
-  if (typeof obj.schemaVersion === "string") {
-    return null;
-  }
-
-  // v1 fallback.
-  const v1 = HandoffPayloadV1Shape.safeParse(obj);
-  if (!v1.success) return null;
-
-  // Normalize v1 to v2 with defaults.
-  const toNames: string[] = [];
-  for (const entry of v1.data.to) {
-    if (typeof entry === "string") {
-      if (entry.length > 0) toNames.push(entry);
-    } else {
-      const idOrName = entry.id ?? entry.name ?? "";
-      if (typeof idOrName === "string" && idOrName.length > 0) toNames.push(idOrName);
-    }
-  }
-
-  const seen = new Set<string>();
-  const resolved: Array<{ id: string; name: string; rawName: string }> = [];
-  for (const rawName of toNames) {
-    const agent = locator(rawName);
-    if (agent && !seen.has(agent.id)) {
-      resolved.push({ id: agent.id, name: agent.name, rawName });
-      seen.add(agent.id);
-    }
-  }
-  if (resolved.length === 0) return null;
-
-  return {
-    schemaVersion: "2.0",
-    traceId: nanoid(),
-    rawTraceId: "",   // v1 blocks carry no traceId — nothing to preserve
-    to: resolved,
-    taskSummary: v1.data.task ?? "",
-    failurePolicy: { onInvalidOutput: "retry", onTimeout: "fallback_echo", maxRetries: 1 },
-  };
+  // misparse. v1 is intentionally NOT supported anymore: it carries no
+  // traceId (breaking retry/dedupe/tracing) and has been unused since v2
+  // became the sole format (0/53 parsed handoffs were v1 in production).
+  return null;
 }
 
 /**
@@ -457,12 +486,9 @@ export function diagnoseHandoffFailure(content: string, locator: AgentLocator): 
     if (typeof obj.schemaVersion === "string") {
       return `unknown schemaVersion "${obj.schemaVersion}"`;
     }
-    if (HandoffPayloadV1Shape.safeParse(obj).success) {
-      const tos = obj.to as Array<string | { id?: string; name?: string }>;
-      const names = tos.map((t) => (typeof t === "string" ? t : (t.id ?? t.name ?? ""))).filter(Boolean);
-      const unknown = names.filter((n) => !locator(n));
-      if (unknown.length > 0) return `v1 handoff targets not found: ${unknown.join(", ")}`;
-      return null;
+    // No schemaVersion at all — legacy v1 shape (retired) or unrelated JSON.
+    if (Array.isArray(obj.to)) {
+      return "handoff-like JSON without schemaVersion (v1 is retired — please use schemaVersion: \"2.0\")";
     }
   }
   return null;
@@ -470,13 +496,21 @@ export function diagnoseHandoffFailure(content: string, locator: AgentLocator): 
 
 function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDirectiveV2 | null {
   const seen = new Set<string>();
-  const resolved: Array<{ id: string; name: string; rawName: string }> = [];
+  const resolved: Array<{ id: string; name: string; rawName: string; taskSummary?: string; requiredOutputSchema?: OutputSchema }> = [];
   for (const entry of payload.to) {
     // Accept both string ("atlas") and object ({id|name|rawName}) forms.
+    // Object entries may carry a per-target taskSummary + requiredOutputSchema
+    // (parallel fan-out with different tasks/artifacts per agent).
     const rawName = typeof entry === "string" ? entry : (entry.id ?? entry.name ?? entry.rawName ?? "");
     const agent = locator(rawName);
     if (agent && !seen.has(agent.id)) {
-      resolved.push({ id: agent.id, name: agent.name, rawName });
+      resolved.push({
+        id: agent.id,
+        name: agent.name,
+        rawName,
+        taskSummary: typeof entry === "object" ? entry.taskSummary : undefined,
+        requiredOutputSchema: typeof entry === "object" ? entry.requiredOutputSchema : undefined,
+      });
       seen.add(agent.id);
     }
   }
@@ -503,9 +537,12 @@ function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDir
 }
 
 /**
- * Strip the handoff JSON from the reply for display purposes. Locates the
- * same object parseHandoff would use, then removes it (plus a wrapping
- * ```handoff fence if present) so routing metadata never leaks into the UI.
+ * Strip the handoff JSON object from the reply for display purposes.
+ * Locates the same object parseHandoff would use, then removes it (plus a
+ * wrapping ```handoff fence if present) so routing metadata never leaks
+ * into the UI. Exactly ONE handoff object per reply is the contract —
+ * parallel fan-out is expressed as a multi-target `to` array, never as
+ * multiple JSON objects.
  */
 export function stripHandoffBlock(content: string): string {
   const match = locateHandoffJson(content);

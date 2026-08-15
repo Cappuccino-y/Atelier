@@ -167,6 +167,107 @@ export function extractTags(content: string): string[] {
 const runningAgents = new Set<string>();
 const agentQueues = new Map<string, Array<() => Promise<void>>>();
 
+/**
+ * Fan-in barrier state for parallel fan-out groups (LangGraph Send + fan-in
+ * pattern). When an agent dispatches to 2+ targets (multi-target `to`), a
+ * group is registered keyed by traceId. Each worker that hands back to the
+ * ORIGINATOR (the agent that fanned out) is held — its result is recorded
+ * but NOT routed — until EVERY worker in the group has finished, at which
+ * point ONE aggregate routing to the originator fires. This prevents the
+ * observed bug: N workers each handoff back to Atlas → Atlas is summoned
+ * N times for the same "wrap-up", producing duplicate summary runs.
+ *
+ * Workers that hand off to a DIFFERENT agent (not the originator) are not
+ * held — they route normally. Workers that end without a handoff also
+ * count as completed (they just contribute no held handoff).
+ */
+type FanOutGroup = {
+  traceId: string;
+  roomId: string;
+  originator: string;
+  targets: Set<string>;
+  completed: Set<string>;
+  /** Held handoff to the originator from the FIRST completed worker (its
+   *  summary task becomes the aggregate's taskSummary). */
+  heldHandoff: HandoffDirectiveV2 | null;
+  results: Array<{ agent: string; content: string }>;
+  fired: boolean;
+  createdAt: number;
+};
+const fanOutGroups = new Map<string, FanOutGroup>();
+const FAN_OUT_TTL_MS = 10 * 60 * 1000; // 10 min safety net against leaks
+
+function registerFanOutGroup(traceId: string, roomId: string, originator: string, targets: string[]) {
+  if (targets.length < 2) return;
+  const existing = fanOutGroups.get(traceId);
+  if (existing) return;
+  fanOutGroups.set(traceId, {
+    traceId,
+    roomId,
+    originator,
+    targets: new Set(targets),
+    completed: new Set(),
+    heldHandoff: null,
+    results: [],
+    fired: false,
+    createdAt: Date.now(),
+  });
+  // Opportunistic cleanup of stale groups.
+  for (const [k, g] of fanOutGroups) {
+    if (Date.now() - g.createdAt > FAN_OUT_TTL_MS && !g.fired) fanOutGroups.delete(k);
+  }
+}
+
+/**
+ * Record a worker's completion against its fan-out group. Returns:
+ *   - { status: "fired", directive } — barrier released, route the aggregate
+ *     wrap-up NOW.
+ *   - { status: "held" } — worker's handoff was absorbed into the group;
+ *     do NOT route it (the originator gets one summary when ALL workers are
+ *     done).
+ *   - { status: "none" } — no fan-out group applies; route normally.
+ */
+function fanOutOnWorkerDone(opts: {
+  traceId: string;
+  roomId: string;
+  worker: string;
+  content: string;
+  handoff: HandoffDirectiveV2 | null;
+}): { status: "fired" | "held" | "none"; directive?: HandoffDirectiveV2 } {
+  const group = fanOutGroups.get(opts.traceId);
+  if (!group || group.fired) return { status: "none" };
+  if (!group.targets.has(opts.worker)) return { status: "none" };
+
+  group.completed.add(opts.worker);
+  group.results.push({ agent: opts.worker, content: opts.content });
+
+  // If this worker handed back to the ORIGINATOR, hold the handoff until
+  // the whole group completes — don't summon the originator yet.
+  const handoffToOriginator = opts.handoff && opts.handoff.to.some((t) => t.id === group.originator);
+  if (handoffToOriginator && !group.heldHandoff) {
+    group.heldHandoff = opts.handoff;
+  }
+
+  const allDone = [...group.targets].every((t) => group.completed.has(t));
+  if (!allDone) return { status: "held" };
+
+  // Barrier released — fire ONE aggregate handoff to the originator.
+  group.fired = true;
+  fanOutGroups.delete(opts.traceId);
+  if (!group.heldHandoff) return { status: "held" }; // nobody asked to wrap up — nothing to route
+
+  const workerSummary = group.results
+    .map((r) => `[${r.agent}]: ${r.content.slice(0, 400).replace(/\n/g, " ")}`)
+    .join("\n");
+  return {
+    status: "fired",
+    directive: {
+      ...group.heldHandoff,
+      taskSummary: `${group.heldHandoff.taskSummary}\n\n[fan-in 聚合 — 全部 ${group.targets.size} 个 worker 已完成]\n${workerSummary}`,
+    },
+  };
+}
+
 function queueKey(roomId: string, agentId: string): string {
   return `${roomId}:${agentId}`;
 }
@@ -218,9 +319,10 @@ type TriggerParams = {
  * Routes a message to the next agent(s).
  *
  * Two legitimate routing sources:
- *   - USER message: @mention in the text triggers the named agents
- *   - AGENT reply: a ```handoff``` JSON block (v1 or v2) with explicit
- *     "to" triggers; prose @mentions are descriptive and ignored
+ *  - USER message: @mention in the text triggers the named agents
+ *  - AGENT reply: a v2 ```handoff``` JSON block (schemaVersion "2.0", one
+ *    or more per reply for parallel fan-out) with explicit "to" triggers;
+ *    prose @mentions are descriptive and ignored
  *
  * Anything else (prose mentions in agent replies, magic tags) does NOT route.
  * Industry consensus (OpenAI Agents SDK, LangGraph Command(goto=), AutoGen
@@ -305,6 +407,9 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
       note: "multi-target handoff — dispatched in parallel (no ordering)",
       timestamp: Date.now(),
     });
+    // Fan-in barrier: remember this fan-out so worker handoffs back to the
+    // originator are coalesced into a single wrap-up (see fanOutOnWorkerDone).
+    registerFanOutGroup(params.handoff.traceId, params.roomId, params.authorId, params.handoff.to.map((t) => t.id));
   }
   const filtered = targets
     .slice(0, MAX_PARALLEL_AGENTS);
@@ -317,21 +422,41 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
     });
   }
 
-  // Build the trailer once so all fanned-out agents see the same trace id
-  // and provenance. Falls back to legacy "[handoff task — authorId]: task"
-  // for v1 blocks without requiredOutputSchema.
-  const trailer = params.handoff ? formatHandoffTaskTrailer(params.handoff) : "";
-  const prompt = trailer ? `${params.content}\n\n${trailer}` : params.content;
+  // Per-target trailer + directive: each fanned-out agent sees its OWN
+  // taskSummary and requiredOutputSchema (per-target overrides the shared
+  // ones) — the directive passed to invokeAgentAsync must also be the
+  // per-target copy, because the worker's completion is validated against
+  // ITS handoff.requiredOutputSchema. Sharing the top-level schema across
+  // different-artifact workers (Forge: result_block / Lens: review_block /
+  // Scout: research_brief) wrongly fails everyone except the first.
+  const perTargetDirective = (m: { id: string }): HandoffDirectiveV2 | undefined => {
+    if (!params.handoff) return undefined;
+    const target = params.handoff.to.find((t) => t.id === m.id);
+    if (!target) return params.handoff;
+    if (!target.taskSummary && !target.requiredOutputSchema) return params.handoff;
+    return {
+      ...params.handoff,
+      taskSummary: target.taskSummary ?? params.handoff.taskSummary,
+      requiredOutputSchema: target.requiredOutputSchema ?? params.handoff.requiredOutputSchema,
+    };
+  };
+  const promptFor = (m: { id: string }): string => {
+    if (!params.handoff) return params.content;
+    const directive = perTargetDirective(m);
+    if (!directive) return params.content;
+    const trailer = formatHandoffTaskTrailer(directive);
+    return trailer ? `${params.content}\n\n${trailer}` : params.content;
+  };
 
   await Promise.allSettled(
     filtered.map((m) =>
       invokeAgentAsync({
         roomId: params.roomId,
         agentId: m.id,
-        prompt,
+        prompt: promptFor(m),
         parentMessageId: params.parentMessageId,
         source: params.source,
-        handoff: params.handoff,
+        handoff: perTargetDirective(m),
       })
     )
   );
@@ -461,14 +586,18 @@ async function invokeAgentAsync(opts: {
       }
 
       // Routing targets come from the structured ```handoff``` block — see
-      // parseHandoff. Prose @mentions are still extracted for display
-      // purposes (UI shows "@Lens" pills) but never drive routing.
+      // parseHandoff. EXACTLY ONE handoff object per reply is the contract:
+      // parallel fan-out uses a multi-target `to` array (optionally with
+      // per-target taskSummary), never multiple JSON objects. Prose
+      // @mentions are still extracted for display purposes (UI shows
+      // "@Lens" pills) but never drive routing.
       const emittedHandoff = parseHandoff(result.content, agentLocator);
       const mentionedAgents = emittedHandoff ? emittedHandoff.to : extractMentions(result.content);
       debugLog("handoff-parse", opts.roomId, opts.agentId, "parsed handoff from reply", {
         emittedHandoff: emittedHandoff
           ? {
               to: emittedHandoff.to.map((t) => t.id),
+              perTargetTasks: emittedHandoff.to.map((t) => t.taskSummary ? `${t.id}: ${t.taskSummary.slice(0, 80)}` : undefined).filter(Boolean),
               taskSummary: emittedHandoff.taskSummary,
               requiredOutputSchema: emittedHandoff.requiredOutputSchema,
               intent: emittedHandoff.intent,
@@ -539,7 +668,7 @@ async function invokeAgentAsync(opts: {
           // 上，重试可被 Stop 取消（透传 signal）。
           const attempt = bumpRetryAttempt(opts.handoff?.traceId);
           const decision = decideRetry({
-            attempt,
+            attempt: attempt - 1, // bumpRetryAttempt is 1-based; decideRetry is 0-based
             maxRetries: failurePolicy.maxRetries,
             elapsedMs: retryElapsedMs(opts.handoff?.traceId, startedAt),
             reason: `run failure: ${result.error ?? "timeout"}`,
@@ -626,9 +755,12 @@ async function invokeAgentAsync(opts: {
           // (invalid) output must NOT route anywhere below.
           const attempt = bumpRetryAttempt(opts.handoff?.traceId);
           const decision = decideRetry({
-            attempt,
+            attempt: attempt - 1, // bumpRetryAttempt is 1-based; decideRetry is 0-based
             maxRetries: failurePolicy.maxRetries,
             elapsedMs: retryElapsedMs(opts.handoff?.traceId, startedAt),
+            // Format errors are transient — budget only by maxRetries, not
+            // wall-clock (the run itself can legitimately take minutes).
+            budgetMs: Infinity,
             reason: `schema-mismatch on "${requiredSchema}"`,
           });
           if (decision.shouldRetry) {
@@ -787,16 +919,38 @@ async function invokeAgentAsync(opts: {
         // current (failed/invalid) output anywhere.
         debugLog("routing", opts.roomId, opts.agentId, "retry in flight — skipping routing of failed output");
       } else if (!validationFailed) {
-        if (emittedHandoff) {
+        // Fan-in barrier: if this worker belongs to an active fan-out group
+        // and handed back to the originator, HOLD the handoff until all
+        // workers complete — then one aggregate wrap-up routes to the
+        // originator. Prevents N workers each summoning Atlas for the same
+        // summary (duplicate wrap-up runs).
+        const barrier = fanOutOnWorkerDone({
+          traceId: opts.handoff?.traceId ?? "",
+          roomId: opts.roomId,
+          worker: opts.agentId,
+          content: result.content,
+          handoff: emittedHandoff,
+        });
+        if (barrier.status === "fired" && barrier.directive) {
+          nextDirectives.push(barrier.directive);
+        } else if (barrier.status === "held") {
+          debugLog("routing", opts.roomId, opts.agentId, "handoff held by fan-in barrier — waiting for remaining workers");
+        } else if (emittedHandoff) {
+          // Parallel fan-out stays a SINGLE handoff with a multi-target `to`
+          // array — triggerOnMessage dispatches all targets concurrently
+          // (Promise.allSettled) and per-target taskSummary is applied there.
           nextDirectives.push(emittedHandoff);
         }
         // else: no handoff, chain ends. The agent either concluded or
         // forgot to hand off — either way, no routing.
       } else if (validationFailed && !echoFallback) {
-        // Route to Atlas with failure context so it can re-pick/adjust.
+        // Route to Atlas with failure context so it can re-pick/adjust —
+        // BUT if this worker belongs to a fan-out group, the failure is a
+        // worker completion too: hand it to the barrier so it's folded into
+        // the single aggregate wrap-up instead of summoning Atlas early.
         const atlas = getAgentByName("atlas");
         if (atlas) {
-          nextDirectives.push({
+          const failDirective: HandoffDirectiveV2 = {
             schemaVersion: "2.0",
             traceId: opts.handoff?.traceId ?? `fail_${Date.now().toString(36)}`,
             rawTraceId: "",
@@ -805,7 +959,21 @@ async function invokeAgentAsync(opts: {
             requiredOutputSchema: "answer_text",
             failurePolicy: { onInvalidOutput: "escalate" as const, onTimeout: "fallback_echo" as const, maxRetries: 0 },
             provenance: { parentAgent: opts.agentId, parentMessageId: id },
+          };
+          const barrier = fanOutOnWorkerDone({
+            traceId: opts.handoff?.traceId ?? "",
+            roomId: opts.roomId,
+            worker: opts.agentId,
+            content: result.content,
+            handoff: failDirective,
           });
+          if (barrier.status === "fired" && barrier.directive) {
+            nextDirectives.push(barrier.directive);
+          } else if (barrier.status === "held") {
+            debugLog("routing", opts.roomId, opts.agentId, "failed worker absorbed by fan-in barrier — waiting for remaining workers");
+          } else {
+            nextDirectives.push(failDirective);
+          }
         }
       }
 

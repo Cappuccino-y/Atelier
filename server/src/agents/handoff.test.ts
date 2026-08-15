@@ -43,12 +43,11 @@ describe("parseHandoff — v2 wire schema", () => {
     assert.equal(parseHandoff(content, locator), null);
   });
 
-  it("accepts legacy v1 {to, task} shape", () => {
+  it("rejects legacy v1 {to, task} shape (v1 retired)", () => {
+    // v1 had no schemaVersion + no traceId — breaking retry/dedupe/tracing.
+    // Only v2 (schemaVersion: "2.0"/"2.1") is accepted now.
     const content = "```handoff\n{\"to\":[\"forge\"],\"task\":\"实现\"}\n```";
-    const d = parseHandoff(content, locator);
-    assert.ok(d);
-    assert.equal(d.to[0].id, "forge");
-    assert.equal(d.taskSummary, "实现");
+    assert.equal(parseHandoff(content, locator), null);
   });
 
   it("returns null when `to` resolves to no known agent", () => {
@@ -168,6 +167,33 @@ describe("parseHandoff — repair (P1-2 regression)", () => {
     assert.equal(d.to[0].id, "lens");
   });
 
+  it("repairs bare ASCII quotes inside taskSummary (resume room regression)", () => {
+    // Lens (MiniMax-M3) wrote "关停" and "性能达标" with ASCII quotes inside
+    // the taskSummary string, breaking JSON. Both the brace-balance scanner
+    // AND the repair pass must tolerate the bare-quote pair.
+    const content = "[STATUS] done\n\n派 Atlas 收尾：\n\n" +
+      '{\n' +
+      '  "schemaVersion": "2.0",\n' +
+      '  "to": ["atlas"],\n' +
+      '  "taskSummary": "CameraHAL 项目 6 标题"关停"为负面信号建议改"性能达标" 4) 其他 minor",\n' +
+      '  "requiredOutputSchema": "answer_text"\n' +
+      '}';
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must parse despite bare quotes");
+    assert.equal(d.to[0].id, "atlas");
+    assert.ok(d.taskSummary.includes("关停"), "quoted content preserved");
+    assert.ok(d.taskSummary.includes("性能达标"), "second quoted pair preserved");
+  });
+
+  it("bare-quote pair followed by whitespace+digit is not a terminator", () => {
+    // `"性能达标" 4)` — the closing quote is followed by space+digit, which
+    // must NOT be treated as a string terminator.
+    const content = '{"schemaVersion":"2.0","to":["atlas"],"taskSummary":"改"性能达标" 4) 继续"}';
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must parse");
+    assert.equal(d.to[0].id, "atlas");
+  });
+
   it("clamps overlong taskSummary instead of rejecting", () => {
     const long = "x".repeat(5000);
     const content = `{"schemaVersion":"2.0","to":["forge"],"taskSummary":"${long}"}`;
@@ -218,6 +244,62 @@ describe("diagnoseHandoffFailure", () => {
   it("returns null when handoff actually parses fine", () => {
     const content = '{"schemaVersion":"2.0","to":["forge"],"taskSummary":"x"}';
     assert.equal(diagnoseHandoffFailure(content, locator), null);
+  });
+});
+
+describe("per-target taskSummary (parallel fan-out with different tasks)", () => {
+  it("resolves per-target taskSummary from object to entries (resume room regression)", () => {
+    // Atlas wanted Forge to explore local files while Scout researched
+    // online — DIFFERENT tasks in parallel. The supported mechanism is ONE
+    // handoff with a multi-target `to` array where each object entry carries
+    // its own taskSummary (LangGraph Send-style), NOT multiple JSON objects.
+    const content = '先说计划。\n' +
+      '{"schemaVersion":"2.0","to":[{"name":"forge","taskSummary":"探索 D:/resume 材料"},{"name":"scout","taskSummary":"在线调研岗位要求"}],"taskSummary":"并行探索"}\n';
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must parse");
+    assert.equal(d.to.length, 2);
+    assert.equal(d.to[0].id, "forge");
+    assert.equal(d.to[0].taskSummary, "探索 D:/resume 材料");
+    assert.equal(d.to[1].id, "scout");
+    assert.equal(d.to[1].taskSummary, "在线调研岗位要求");
+  });
+
+  it("string to entries get NO per-target task (fall back to shared)", () => {
+    const content = '{"schemaVersion":"2.0","to":["analyst","lens"],"taskSummary":"分析并复核"}';
+    const d = parseHandoff(content, locator);
+    assert.ok(d);
+    assert.equal(d.to[0].taskSummary, undefined);
+    assert.equal(d.to[1].taskSummary, undefined);
+  });
+
+  it("per-target requiredOutputSchema overrides shared (demo room regression)", () => {
+    // Atlas fanned out 3 DIFFERENT-artifact tasks (Forge: result_block /
+    // Lens: review_block / Scout: research_brief) but the shared top-level
+    // requiredOutputSchema was result_block — Scout's [RESEARCH] reply was
+    // wrongly rejected. Each to-entry may declare its own schema.
+    const content = '{"schemaVersion":"2.0","to":[' +
+      '{"name":"forge","taskSummary":"实现","requiredOutputSchema":"result_block"},' +
+      '{"name":"lens","taskSummary":"审查","requiredOutputSchema":"review_block"},' +
+      '{"name":"scout","taskSummary":"调研","requiredOutputSchema":"research_brief"}],' +
+      '"taskSummary":"并行探索","requiredOutputSchema":"result_block"}';
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must parse");
+    assert.equal(d.to[0].requiredOutputSchema, "result_block");
+    assert.equal(d.to[1].requiredOutputSchema, "review_block");
+    assert.equal(d.to[2].requiredOutputSchema, "research_brief");
+  });
+
+  it("second JSON object in a reply is IGNORED (single-handoff contract)", () => {
+    // Industry alignment: OpenAI Swarm uses only one handoff per turn;
+    // AutoGen warns concurrent handoffs cause unexpected behavior. The
+    // first matching object wins, the rest are dropped.
+    const content =
+      '{"schemaVersion":"2.0","to":["forge"],"taskSummary":"探索"}\n' +
+      '{"schemaVersion":"2.0","to":["scout"],"taskSummary":"调研"}\n';
+    const d = parseHandoff(content, locator);
+    assert.ok(d);
+    assert.equal(d.to.length, 1);
+    assert.equal(d.to[0].id, "forge", "first handoff wins");
   });
 });
 
