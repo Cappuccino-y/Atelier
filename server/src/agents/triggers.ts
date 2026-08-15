@@ -81,6 +81,22 @@ function getAgentById(id: string): AgentRow | null {
   return row ?? null;
 }
 
+const orchestratorCache = new Map<string, boolean>();
+
+/**
+ * True for agents whose role is "orchestrator" (Atlas). Orchestrators decide
+ * and summarize; they never produce the downstream worker's [TAG] block, so
+ * an inherited requiredOutputSchema (echoed back by a worker's handoff) must
+ * not be enforced against them.
+ */
+function isOrchestratorAgent(agentId: string): boolean {
+  if (orchestratorCache.has(agentId)) return orchestratorCache.get(agentId)!;
+  const row = db.prepare("SELECT role FROM agents WHERE id = ?").get(agentId) as { role: string } | undefined;
+  const isOrch = row?.role === "orchestrator";
+  orchestratorCache.set(agentId, isOrch);
+  return isOrch;
+}
+
 /**
  * Add agent ids to a room's roster (idempotent) and broadcast the update so
  * the Agents panel reflects everyone who actually worked in the room — not
@@ -735,7 +751,15 @@ async function invokeAgentAsync(opts: {
       // delegates implementation to Forge, and its reply has no [RESEARCH]
       // tag → whole chain dies). The downstream receiver's reply is validated
       // against ITS OWN directive instead.
-      } else if (!cancelled && requiredSchema && !emittedHandoff && !validateOutputAgainstSchema(result.content, requiredSchema)) {
+      //
+      // Orchestrators (Atlas) are exempt from the inherited schema: a worker
+      // that hand offs back to its originator often echoes the SAME
+      // requiredOutputSchema it was given ("research_brief"), which the
+      // orchestrator's decision/summary reply never contains a [RESEARCH]
+      // block for. That falsely flagged the orchestrator's reply as
+      // schema-mismatch (resume room: Scout → Atlas with research_brief →
+      // Atlas summary rejected → retry → exhausted → silent dead-end).
+      } else if (!cancelled && requiredSchema && !emittedHandoff && !isOrchestratorAgent(opts.agentId) && !validateOutputAgainstSchema(result.content, requiredSchema)) {
         validationFailed = true;
         const vResult = validateOutputAgainstSchemaDetailed(result.content, requiredSchema);
         sendAll("system.warning", {
