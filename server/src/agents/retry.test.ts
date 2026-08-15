@@ -14,16 +14,17 @@ describe("decideRetry", () => {
     assert.match(d.reason, /maxRetries/);
   });
 
-  it("refuses when default 30s budget exhausted (run-failed path)", () => {
+  it("refuses when default 30s budget exhausted (default decideRetry behavior)", () => {
     const d = decideRetry({ attempt: 0, maxRetries: 3, elapsedMs: 31_000, reason: "timeout" });
     assert.equal(d.shouldRetry, false);
     assert.match(d.reason, /budget/);
   });
 
-  it("retries long-running format failures when budgetMs is Infinity (schema-mismatch path)", () => {
-    // Forge ran 168s then failed with a format error — the run itself was
-    // legitimate work, so wall-clock must NOT veto the retry. maxRetries is
-    // the only cap.
+  it("retries long-running failures when budgetMs is Infinity (schema-mismatch AND run-failed paths)", () => {
+    // Forge ran 168s then failed (exit code 1 / format error) — the run
+    // itself was legitimate work, so wall-clock must NOT veto the retry.
+    // maxRetries is the only cap. Both the schema-mismatch branch and the
+    // run-failed branch in triggers.ts pass budgetMs: Infinity now.
     const d = decideRetry({ attempt: 0, maxRetries: 1, elapsedMs: 168_000, reason: "schema-mismatch", budgetMs: Infinity });
     assert.equal(d.shouldRetry, true);
   });

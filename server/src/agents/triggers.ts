@@ -653,7 +653,12 @@ async function invokeAgentAsync(opts: {
         // opencode 进程失败（超时/退出码非零/无输出）——按 failurePolicy.onTimeout 处理
         validationFailed = true;
         const policy = failurePolicy.onTimeout ?? "fallback_echo";
-        if (policy === "fallback_echo") {
+        if (policy === "fallback_echo" && opts.agentId !== "echo") {
+          // 失败兜底派 Echo 接管。但 Echo 自己失败时不能再派 Echo（自杀
+          // 循环，见 resume room: Forge exit 1 → Echo exit 1 → 静默死链，
+          // Atlas 完全不知情）——Echo 的失败落到下方
+          // `validationFailed && !echoFallback` 分支，路由回发起者 Atlas，
+          // 让它知道 Forge 线死了并重新决策。
           echoFallback = buildEchoFallback({
             from: opts.agentId,
             parentTraceId: opts.handoff?.traceId ?? "unknown",
@@ -671,6 +676,10 @@ async function invokeAgentAsync(opts: {
             attempt: attempt - 1, // bumpRetryAttempt is 1-based; decideRetry is 0-based
             maxRetries: failurePolicy.maxRetries,
             elapsedMs: retryElapsedMs(opts.handoff?.traceId, startedAt),
+            // Long implementation tasks (Forge editing files, compiling,
+            // rendering) legitimately run minutes — wall-clock must not veto
+            // the retry; maxRetries is the cap (already clamped to 0..3).
+            budgetMs: Infinity,
             reason: `run failure: ${result.error ?? "timeout"}`,
           });
           if (decision.shouldRetry) {
@@ -737,9 +746,10 @@ async function invokeAgentAsync(opts: {
           detail: vResult.reason ?? undefined,
           traceId: opts.handoff?.traceId,
         });
-        if (failurePolicy.onInvalidOutput === "fallback_echo") {
+        if (failurePolicy.onInvalidOutput === "fallback_echo" && opts.agentId !== "echo") {
           // hand the task to echo with full context so it can either
-          // produce a degraded answer or escalate via [BLOCKER].
+          // produce a degraded answer or escalate via [BLOCKER]. Echo's own
+          // failure routes back to the originator below (no echo-of-echo).
           echoFallback = buildEchoFallback({
             from: opts.agentId,
             parentTraceId: opts.handoff?.traceId ?? "unknown",
@@ -950,12 +960,15 @@ async function invokeAgentAsync(opts: {
         // the single aggregate wrap-up instead of summoning Atlas early.
         const atlas = getAgentByName("atlas");
         if (atlas) {
+          const failSummary = runFailed
+            ? `上一步 agent "${opts.agentId}" 运行失败（${result.error ?? "timeout"}，无有效输出）。该 agent 的重试已耗尽或无法重试——链在此中断。请评估后决定下一步：重新派发该任务（可换人/换模型）、调整任务描述、或告知用户。`
+            : `上一步 agent "${opts.agentId}" 输出未通过 schema 校验（期望 ${requiredSchema}），重试已耗尽。请评估后决定下一步：换人、调整任务描述、或告知用户`;
           const failDirective: HandoffDirectiveV2 = {
             schemaVersion: "2.0",
             traceId: opts.handoff?.traceId ?? `fail_${Date.now().toString(36)}`,
             rawTraceId: "",
             to: [{ id: atlas.id, name: atlas.name, rawName: "atlas" }],
-            taskSummary: `上一步 agent "${opts.agentId}" 输出未通过 schema 校验（期望 ${requiredSchema}），请评估后决定下一步：换人、调整任务描述、或告知用户`,
+            taskSummary: failSummary,
             requiredOutputSchema: "answer_text",
             failurePolicy: { onInvalidOutput: "escalate" as const, onTimeout: "fallback_echo" as const, maxRetries: 0 },
             provenance: { parentAgent: opts.agentId, parentMessageId: id },

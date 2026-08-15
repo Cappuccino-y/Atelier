@@ -194,6 +194,57 @@ describe("parseHandoff — repair (P1-2 regression)", () => {
     assert.equal(d.to[0].id, "atlas");
   });
 
+  it("finds handoff after CSS code block + prose full of bare Chinese quotes (resume room regression 2)", () => {
+    // Lens replied with a long markdown report containing a CSS sample
+    // ({...} blocks) and tons of ASCII-quoted Chinese words ("假两栏",
+    // "工作经历", "进度条" ...). The naive whole-text scan balanced the
+    // CSS braces against quotes in the prose and swallowed the tail of
+    // the reply, hiding the real handoff. Anchor/fence-first extraction
+    // must still find it.
+    const content = [
+      "[REVIEW] 调研完成。",
+      "",
+      "## 风格流派光谱（按\"装饰度\"从低到高）",
+      '1. **"现代极简" ≠ "黑白极简"** —— 2026 主流是 **"近黑 + 1 个 accent + 1 条短横线"**',
+      '2. **"假两栏" grid**（单栏文本流，ATS 友好）',
+      "",
+      "参考 CSS：",
+      "```css",
+      ":before { ",
+      "  content:\"\"; width:5px; height:24px; background:#1f4d8f;",
+      "}",
+      "```",
+      "",
+      "---",
+      "",
+      "派 Atlas 接力：这是给终审用的 brief，Forge 不需要立刻改任何东西。",
+      '',
+      '{"schemaVersion":"2.0","to":["atlas"],"taskSummary":"Lens 视觉基准 brief 已就绪 — 60 分制打分标准、6 项基准每项都有具体阈值。","requiredOutputSchema":"answer_text","constraints":{"deadlineMs":60000,"maxTokens":4000}}',
+    ].join("\n");
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must find handoff after CSS sample + quoted prose");
+    assert.equal(d.to[0].id, "atlas");
+    assert.ok(d.taskSummary.includes("60 分制"), "real handoff (not a CSS brace) selected");
+  });
+
+  it("handoff inside a ```json fence is preferred", () => {
+    const content = "如下：\n\n```json\n{\"schemaVersion\":\"2.0\",\"to\":[\"forge\"],\"taskSummary\":\"渲染 PNG\"}\n```\n\n若有问题请反馈。";
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must find fenced handoff");
+    assert.equal(d.to[0].id, "forge");
+  });
+
+  it("prose mention of \"schemaVersion\" without object position is ignored", () => {
+    // The prose contains `"schemaVersion"` as quoted text but NOT as a JSON
+    // key — the anchor check (preceding non-ws char must be { or ,) rejects
+    // it, and the real handoff later is found.
+    const content = "注意：务必使用\"schemaVersion\": 2.0 字段。\n\n" +
+      '{"schemaVersion":"2.1","to":["lens"],"taskSummary":"x","requiredOutputSchema":"answer_text"}';
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must skip prose mention and find the real object");
+    assert.equal(d.to[0].id, "lens");
+  });
+
   it("clamps overlong taskSummary instead of rejecting", () => {
     const long = "x".repeat(5000);
     const content = `{"schemaVersion":"2.0","to":["forge"],"taskSummary":"${long}"}`;

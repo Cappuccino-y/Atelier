@@ -14,6 +14,11 @@ db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -290,7 +295,13 @@ function seedDatabase() {
 }
 
 const roomCount = db.prepare("SELECT COUNT(*) AS count FROM rooms").get() as CountRow;
-if (roomCount.count === 0) seedDatabase();
+const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seed_db'").get() as { value: string } | undefined;
+if (!seeded && roomCount.count === 0) seedDatabase();
+// Mark the first-time seed as done even if it was skipped (rooms already
+// existed) so a user deleting ALL rooms does not resurrect the preset rooms
+// on the next start. The seed is a one-time initialization, not a migration
+// that re-runs on every boot.
+if (!seeded) db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('seed_db', '1')").run();
 
 /**
  * Migration: ensure all v2 agents exist in the agents table, even on
@@ -330,9 +341,13 @@ migrateAgentsV2();
 
 /**
  * Migration: ensure new rooms exist (kb-curation, visual-review).
- * Existing rooms are not touched (user may have customized them).
+ * Runs ONCE (flagged in the meta table). Without the flag, every start
+ * re-inserted these preset rooms with INSERT OR IGNORE — a user who
+ * deleted them saw them resurrect on the next `atelier start`.
  */
 function migrateRoomsV2(): void {
+  const done = db.prepare("SELECT value FROM meta WHERE key = 'rooms_v2_migrated'").get() as { value: string } | undefined;
+  if (done) return;
   const now = Date.now();
   const insertRoom = db.prepare(`
     INSERT OR IGNORE INTO rooms (id, name, topic, status, unread, last_activity, agent_ids, notes, created_at)
@@ -343,5 +358,6 @@ function migrateRoomsV2(): void {
     ["visual-review", "Visual Review", "screenshots",   "active", 0, now - 1 * 60_000, JSON.stringify(["atlas","vis","writer","analyst","user"]), "", now],
   ];
   for (const r of newRooms) insertRoom.run(...r);
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('rooms_v2_migrated', '1')").run();
 }
 migrateRoomsV2();

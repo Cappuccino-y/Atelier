@@ -233,6 +233,105 @@ type JsonMatch = { text: string; start: number; end: number };
  *
  * This kills the nested-fence failure mode entirely — there is no fence to
  * truncate, and braces inside a `taskSummary` string are correctly skipped.
+ *
+ * NOTE: naive whole-text scanning has a real failure mode — prose that
+ * contains ASCII double quotes (Chinese text like "假两栏" written with
+ * straight quotes) corrupts the in-string state of the scan, so a stray
+ * `{` from a CSS/JS code block can swallow the rest of the reply and the
+ * real handoff JSON is never seen. Best practice (see athenaeum,
+ * json-from-llm, ai-json-safe-parse) is to try the most promising regions
+ * FIRST: markdown-fenced JSON blocks, then objects anchored on a known
+ * required key (`"schemaVersion"`), and only fall back to a whole-text
+ * scan. locateHandoffJson does exactly that.
+ */
+
+/**
+ * Scan from a `{` at `start` for the balanced closing `}`. String-aware
+ * (skips braces inside string literals, tolerates bare ASCII quotes inside
+ * strings as a non-terminator unless followed by a JSON structural char).
+ * Returns the matched span, or null if unbalanced/unterminated.
+ */
+function scanBalancedObjectAt(content: string, start: number): JsonMatch | null {
+  let depth = 0;
+  let inString = false;
+  for (let j = start; j < content.length; j++) {
+    const ch = content[j];
+    if (inString) {
+      if (ch === "\\") { j++; continue; }
+      if (ch === '"') {
+        // Bare-quote tolerance: a `"` is a real string terminator only if
+        // what follows (skipping whitespace) is a JSON structural char
+        // (`, ] } :`) or end-of-input. `"关停"` / `"假两栏"` written with
+        // straight quotes stay inside the string. Mirrors repairJson.
+        const after = content.slice(j + 1);
+        const fns = after.match(/\S/);
+        const firstNonWs = fns ? after[fns.index!] : undefined;
+        if (firstNonWs === undefined || /[,\]\}:]/.test(firstNonWs)) inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return { text: content.slice(start, j + 1), start, end: j + 1 };
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract candidates from markdown-fenced JSON blocks (```json / ```jsonc /
+ * bare ```), in document order. Fenced content is the strongest signal that
+ * the model meant "this is JSON" (see athenaeum's fence-first extraction).
+ */
+function fencedCandidates(content: string): JsonMatch[] {
+  const out: JsonMatch[] = [];
+  const fenceRe = /^[ ]{0,3}```(?:jsonc?|JSON)?[^\n]*\n([\s\S]*?)^[ ]{0,3}```/gm;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(content))) {
+    const inner = m[1];
+    // Trim the inner block; offsets stay approximate — the candidate text
+    // is what matters, stripHandoffBlock re-scans the raw content anyway.
+    const trimmed = inner.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      const start = m.index + m[0].indexOf(trimmed);
+      out.push({ text: trimmed, start, end: start + trimmed.length });
+    }
+  }
+  return out;
+}
+
+/**
+ * Anchor-based candidates: find every `"schemaVersion"` key, verify the
+ * non-whitespace char before it is `{` or `,` (a real JSON object key),
+ * then balance-scan from that `{`. This skips prose noise entirely —
+ * body text mentioning `"schemaVersion"` without an object position is
+ * rejected, and a stray `{` from a CSS block is never even considered.
+ */
+function anchoredCandidates(content: string): JsonMatch[] {
+  const out: JsonMatch[] = [];
+  let from = 0;
+  for (;;) {
+    const idx = content.indexOf('"schemaVersion"', from);
+    if (idx === -1) break;
+    let prev = idx - 1;
+    while (prev >= 0 && /\s/.test(content[prev])) prev--;
+    if (prev >= 0 && (content[prev] === "{" || content[prev] === ",")) {
+      const match = scanBalancedObjectAt(content, prev);
+      if (match) out.push(match);
+    }
+    from = idx + 1;
+  }
+  return out;
+}
+
+/**
+ * Whole-text fallback: scan every `{` in document order and balance-scan
+ * from it. This is the last resort — it is the least precise (prose braces
+ * from CSS/JS samples can interfere) but guarantees a well-formed handoff
+ * is found even when it is not fenced and its `schemaVersion` anchor got
+ * mangled. Uses scanBalancedObjectAt for string-aware balancing.
  */
 function findBalancedJsonObjects(content: string): JsonMatch[] {
   const out: JsonMatch[] = [];
@@ -240,49 +339,16 @@ function findBalancedJsonObjects(content: string): JsonMatch[] {
   while (i < content.length) {
     const start = content.indexOf("{", i);
     if (start === -1) break;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    let end = -1;
-    for (let j = start; j < content.length; j++) {
-      const ch = content[j];
-      if (inString) {
-        if (escaped) { escaped = false; continue; }
-        if (ch === "\\") { escaped = true; continue; }
-    if (ch === '"') {
-      // Bare-quote tolerance: models occasionally write ASCII quotes
-      // INSIDE string values (e.g. `"关停"` instead of `"关停"`), which
-      // would otherwise terminate the string early and break brace
-      // depth tracking. Mirrors repairJson rule 3: a quote is a real
-      // terminator only if what follows (skipping whitespace) is a JSON
-      // structural char (`, ] } : `) or end-of-input. `"性能达标" 4)`
-      // — quote, space, digit — is a bare-quote pair, NOT a terminator.
-      const after = content.slice(j + 1);
-      const firstNonWsMatch = after.match(/\S/);
-      const firstNonWs = firstNonWsMatch ? after[firstNonWsMatch.index!] : undefined;
-      const isTerminator = firstNonWs === undefined || /[,\]\}:]/.test(firstNonWs);
-      if (isTerminator) inString = false;
-      continue;
-    }
-    continue;
-      }
-      if (ch === '"') { inString = true; continue; }
-      if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) { end = j; break; }
-      }
-    }
-    if (end === -1) {
+    const match = scanBalancedObjectAt(content, start);
+    if (!match) {
       // Unclosed `{` — a markdown code sample or prose with an unbalanced
       // brace. Skip PAST this brace instead of aborting the whole scan, so a
-      // later well-formed handoff JSON is still found. (The old `break`
-      // silently dropped every valid handoff that came after any code block.)
+      // later well-formed handoff JSON is still found.
       i = start + 1;
       continue;
     }
-    out.push({ text: content.slice(start, end + 1), start, end: end + 1 });
-    i = end + 1;
+    out.push(match);
+    i = match.end;
   }
   return out;
 }
@@ -373,16 +439,35 @@ function repairJson(raw: string): string | null {
 
 /**
  * Find the raw JSON text of the handoff object in the reply, or null.
- * Scans every brace-balanced object and returns the first one that parses
+ * Scans candidates in priority order and returns the first one that parses
  * to a recognized handoff shape (v2.1/v2.0). Used by both parseHandoff
  * and stripHandoffBlock so the two stay consistent.
  *
+ * Candidate priority (best practice for extracting JSON from LLM prose):
+ *   1. Markdown-fenced JSON blocks (```json ... ```) — the model's most
+ *      explicit "this is JSON" signal.
+ *   2. Objects anchored on the `"schemaVersion"` key — our handoff schema
+ *      requires it, and in real JSON its preceding non-whitespace char is
+ *      always `{` or `,`. This skips prose noise (CSS/JS samples, Chinese
+ *      text with straight ASCII quotes) that corrupts whole-text scans.
+ *   3. Whole-text brace scan — last resort for mangled output.
+ *
  * `text` in the returned match may be REPAIRED (trailing commas / illegal
- * escapes fixed) — callers must parse `match.text`, not re-scan the raw
- * content, or the repair is silently undone.
+ * escapes / bare quotes fixed) — callers must parse `match.text`, not
+ * re-scan the raw content, or the repair is silently undone.
  */
 function locateHandoffJson(content: string): JsonMatch | null {
-  for (const match of findBalancedJsonObjects(content)) {
+  // Deduplicate by start offset (a fenced object is often also found by
+  // the anchor scan; the whole-text scan would find it again).
+  const seen = new Set<number>();
+  const candidates = [
+    ...fencedCandidates(content),
+    ...anchoredCandidates(content),
+    ...findBalancedJsonObjects(content),
+  ];
+  for (const match of candidates) {
+    if (seen.has(match.start)) continue;
+    seen.add(match.start);
     let raw: unknown;
     let reparsed = match.text;
     try {
