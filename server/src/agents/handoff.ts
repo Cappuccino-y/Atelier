@@ -1,5 +1,5 @@
 /**
- * handoff.ts — Handoff v2 typed payload schema and parser.
+ * Handoff v2 typed payload schema and parser.
  *
  * Industry consensus (OpenAI Agents SDK, Google A2A protocol, Anthropic
  * multi-agent research, Microsoft Agent Framework) is that inter-agent
@@ -10,7 +10,10 @@
  *   - schemaVersion   — for backward-incompatible migrations
  *   - traceId         — single id propagated through the entire task tree
  *   - taskSummary     — replaces v1 `task` with explicit field
- *   - provenance      — parent agent + parent message id + context excerpt
+ *   - provenance      — parent agent + parent message id + STRUCTURED context
+ *                       (v2.1: replaces the v2.0 `contextExcerpt` string with
+ *                       a typed object — taskSummary + outputHighlights +
+ *                       attachedFacts + skippedNoise + parentChain)
  *   - requiredOutputSchema — what tag/output downstream agent must produce
  *   - constraints     — deadline / token budget
  *   - evidenceStandard — strict / balanced / loose (mirrors Anthropic's
@@ -21,6 +24,11 @@
  * traceId, breaking retry/dedupe/tracing, and went unused in production).
  * Parsing returns a normalized v2 object (HandoffDirectiveV2) with sensible
  * defaults filled in, so callers don't need to branch on schema version.
+ *
+ * Backward compatibility for v2.0 agents: the legacy `contextExcerpt` string
+ * field is still accepted and rendered (as `[context excerpt]: ...`). New
+ * agents should emit the structured `context` block instead. Both can
+ * coexist — structured wins when present.
  */
 
 import { z } from "zod";
@@ -44,6 +52,50 @@ export const OutputSchemaEnum = z.enum([
 ]);
 
 export type OutputSchema = z.infer<typeof OutputSchemaEnum>;
+
+/**
+ * v2.1 structured handoff context — replaces the v2.0 `contextExcerpt` string
+ * with a typed object so downstream agents receive explicit coordination
+ * metadata instead of an opaque text blob. Each field has a clear role:
+ *
+ *   - taskSummary     — upstream agent's task in one line (echo of the
+ *                       parent handoff's taskSummary, for self-contained
+ *                       context).
+ *   - outputHighlights — 1-3 bullet conclusions from upstream, the parts
+ *                       downstream MUST build on. Lets the receiver skip
+ *                       the upstream's intermediate reasoning while keeping
+ *                       the decisions.
+ *   - attachedFacts   — cross-step facts downstream MUST honor (deadlines,
+ *                       workspace paths, conventions). Survives truncation.
+ *   - skippedNoise    — explicit log of what was omitted from upstream's
+ *                       output before forwarding. Tells downstream not to
+ *                       re-explore that territory.
+ *   - parentChain     — traceId ancestors (root → immediate parent). Cheap
+ *                       way for downstream to see how deep the chain is.
+ */
+export const HandoffContextSchema = z.object({
+  taskSummary: z.preprocess(
+    (v) => (typeof v === "string" ? v.slice(0, 500) : v),
+    z.string().min(1).max(500).optional(),
+  ),
+  outputHighlights: z.preprocess(
+    (v) => (Array.isArray(v) ? v.slice(0, 5).map((s) => String(s).slice(0, 300)) : v),
+    z.array(z.string().min(1)).max(5).optional(),
+  ),
+  attachedFacts: z.preprocess(
+    (v) => (Array.isArray(v) ? v.slice(0, 8).map((s) => String(s).slice(0, 300)) : v),
+    z.array(z.string().min(1)).max(8).optional(),
+  ),
+  skippedNoise: z.preprocess(
+    (v) => (Array.isArray(v) ? v.slice(0, 8).map((s) => String(s).slice(0, 200)) : v),
+    z.array(z.string().min(1)).max(8).optional(),
+  ),
+  parentChain: z.preprocess(
+    (v) => (Array.isArray(v) ? v.slice(0, 20).map((s) => String(s)) : v),
+    z.array(z.string()).max(20).optional(),
+  ),
+});
+export type HandoffContext = z.infer<typeof HandoffContextSchema>;
 
 /**
  * What tag the agent should output for each OutputSchema. Used to validate
@@ -137,6 +189,11 @@ export const HandoffPayloadV2_1Schema = z.object({
   provenance: z.object({
     parentAgent: z.string().optional(),
     parentMessageId: z.string().optional(),
+    /** v2.1 structured context (preferred over contextExcerpt). */
+    context: HandoffContextSchema.optional(),
+    /** v2.0 legacy string excerpt. Still parsed + rendered for back-compat
+     *  with agents written before structured context existed. Structured
+     *  `context` wins when both are present. */
     contextExcerpt: z.string().max(2000).optional(),
   }).optional(),
   requiredOutputSchema: OutputSchemaEnum.optional(),
@@ -654,8 +711,8 @@ export function stripHandoffBlock(content: string): string {
 
 /**
  * Format the handoff task trailer that gets appended to the receiving
- * agent's prompt. v2.1 includes schemaVersion + traceId + provenance +
- * intent + attachmentRefs summary.
+ * agent's prompt. v2.1 renders structured `provenance.context` (preferred);
+ * falls back to v2.0 `provenance.contextExcerpt` for back-compat.
  */
 export function formatHandoffTaskTrailer(directive: HandoffDirectiveV2): string {
   const parts: string[] = [];
@@ -674,7 +731,36 @@ export function formatHandoffTaskTrailer(directive: HandoffDirectiveV2): string 
   if (directive.evidenceStandard) {
     parts.push(`\n[evidence standard: ${directive.evidenceStandard}]`);
   }
-  if (directive.provenance?.contextExcerpt) {
+  if (directive.constraints) {
+    const c = directive.constraints;
+    const bits: string[] = [];
+    if (c.deadlineMs != null) bits.push(`deadline=${(c.deadlineMs / 1000).toFixed(0)}s`);
+    if (c.maxTokens != null) bits.push(`maxTokens=${c.maxTokens}`);
+    if (bits.length > 0) parts.push(`\n[constraints]: ${bits.join("; ")}`);
+  }
+  // v2.1 structured context (preferred)
+  const ctx = directive.provenance?.context;
+  if (ctx) {
+    const blocks: string[] = [];
+    if (ctx.taskSummary) blocks.push(`taskSummary: ${ctx.taskSummary}`);
+    if (ctx.outputHighlights && ctx.outputHighlights.length > 0) {
+      blocks.push(`outputHighlights:\n${ctx.outputHighlights.map((h) => `  - ${h}`).join("\n")}`);
+    }
+    if (ctx.attachedFacts && ctx.attachedFacts.length > 0) {
+      blocks.push(`attachedFacts (must honor):\n${ctx.attachedFacts.map((f) => `  - ${f}`).join("\n")}`);
+    }
+    if (ctx.skippedNoise && ctx.skippedNoise.length > 0) {
+      blocks.push(`skippedNoise (do not re-explore):\n${ctx.skippedNoise.map((n) => `  - ${n}`).join("\n")}`);
+    }
+    if (ctx.parentChain && ctx.parentChain.length > 0) {
+      blocks.push(`parentChain: ${ctx.parentChain.join(" → ")}`);
+    }
+    if (blocks.length > 0) {
+      parts.push(`\n[handoff context]:\n${blocks.join("\n")}`);
+    }
+  }
+  // v2.0 legacy fallback
+  if (!ctx && directive.provenance?.contextExcerpt) {
     parts.push(`\n[context excerpt]:\n${directive.provenance.contextExcerpt}`);
   }
   return parts.join("\n");

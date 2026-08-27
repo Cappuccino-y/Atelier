@@ -95,6 +95,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_activities_room ON activities(room_id, timestamp DESC);
 `);
 
+// Summarization checkpoints — per-(room, profile) rolling LLM summaries of
+// older history. Loaded by runtime.ts alongside raw messages to keep the
+// injected context window bounded without losing prior reasoning. Replaces
+// the "drop everything past the budget" hard cutoff that the previous
+// implementation used (which simply lost earlier turns entirely).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS message_summaries (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    profile_key TEXT NOT NULL,
+    up_to_message_id TEXT NOT NULL,
+    up_to_timestamp INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    covered_count INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_summaries_lookup
+    ON message_summaries(room_id, profile_key, up_to_timestamp DESC);
+`);
+
 // Additive migrations — older DB files predated these columns and CREATE
 // TABLE IF NOT EXISTS won't add them. Try/catch so already-migrated DBs
 // don't blow up on startup.

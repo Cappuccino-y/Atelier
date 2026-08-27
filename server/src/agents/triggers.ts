@@ -919,6 +919,15 @@ async function invokeAgentAsync(opts: {
         });
       }
 
+      // Fire-and-forget summarization checkpoint. Industry pattern
+      // (LangGraph MemoryStore, OpenAI Sessions): keep the last N raw
+      // turns and roll older history into a per-(room, role) summary.
+      // Cheap when conditions aren't met — just one COUNT(*) query.
+      // Safe to import lazily here to avoid a circular dep with runtime.ts.
+      void import("./summarizer.js").then(({ maybeSummarize }) => {
+        maybeSummarize(opts.roomId, opts.agentId);
+      }).catch(() => { /* summarizer unavailable — never fatal */ });
+
       sendAll("agent.completed", {
         roomId: opts.roomId,
         agentId: opts.agentId,
