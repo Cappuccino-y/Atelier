@@ -14,6 +14,9 @@ import {
   Circle,
   MessageCircleQuestion,
   Diamond,
+  Check,
+  X,
+  Waypoints,
 } from "lucide-react";
 import { useState, useCallback, useEffect, memo } from "react";
 import { api } from "@/lib/api";
@@ -25,6 +28,8 @@ type Props = {
   mentionedAgents?: Agent[];
   isGrouped?: boolean;
   index?: number;
+  onReply?: (text: string, targetAgentName: string) => void;
+  onShowChain?: (message: Message) => void;
 };
 
 const SEVERITY_STYLE: Record<string, { bar: string; badge: string }> = {
@@ -79,6 +84,142 @@ function extractFileSummary(content: string): {
   }
   return { files, remainder };
 }
+
+/**
+ * Models frequently emit the handoff contract as an inline JSON object in
+ * prose (`... 并行派出： {"schemaVersion":"2.0", ...}`). Extract the first
+ * balanced `{...}` object that looks like a handoff payload (must parse and
+ * carry a `to` field) so it can be rendered as a structured card instead of
+ * a wall of raw JSON, returning the remaining prose.
+ */
+function extractInlineHandoff(content: string): { payload: Record<string, unknown> | null; remainder: string } {
+  const start = content.indexOf('{"schemaVersion"');
+  if (start < 0) return { payload: null, remainder: content };
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let end = -1;
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (esc) { esc = false; continue; }
+    if (ch === "\\") { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end < 0) return { payload: null, remainder: content };
+  try {
+    const payload = JSON.parse(content.slice(start, end));
+    if (!payload || typeof payload !== "object" || !Array.isArray((payload as any).to)) {
+      return { payload: null, remainder: content };
+    }
+    return { payload, remainder: (content.slice(0, start) + content.slice(end)).replace(/\s{2,}/g, " ").trim() };
+  } catch {
+    return { payload: null, remainder: content };
+  }
+}
+
+/** Parse a fenced ```handoff block body into a payload object. */
+function parseHandoffBlock(code: string): Record<string, unknown> | null {
+  try {
+    const obj = JSON.parse(code);
+    if (obj && typeof obj === "object" && Array.isArray((obj as any).to)) return obj;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const AGENT_ROLE_COLORS: Record<string, string> = {
+  atlas: "#8B5CF6", forge: "#F97316", lens: "#06B6D4", echo: "#22C55E",
+  trainer: "#A855F7", scout: "#10B981", analyst: "#F59E0B", writer: "#3B82F6",
+  archivist: "#6366F1", user: "#64748B",
+};
+
+function hashString(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function toEntryName(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object") {
+    const o = e as any;
+    return String(o.name ?? o.id ?? "agent");
+  }
+  return "agent";
+}
+
+/**
+ * Structured card replacing the raw handoff JSON blob agents emit in prose.
+ * Shows route targets, intent, required output schema, and budget hints.
+ */
+function HandoffCard({ payload }: { payload: Record<string, unknown> }) {
+  const to = Array.isArray(payload.to) ? payload.to.map(toEntryName) : [];
+  const taskSummary = typeof payload.taskSummary === "string"
+    ? payload.taskSummary
+    : typeof payload.task === "string" ? payload.task : "";
+  const intent = typeof payload.intent === "string" ? payload.intent : null;
+  const schema = typeof payload.requiredOutputSchema === "string" ? payload.requiredOutputSchema : null;
+  const traceId = typeof payload.traceId === "string" ? payload.traceId.slice(0, 8) : null;
+  const constraints = (payload.constraints && typeof payload.constraints === "object")
+    ? payload.constraints as Record<string, unknown>
+    : null;
+  const evidence = typeof payload.evidenceStandard === "string" ? payload.evidenceStandard : null;
+
+  return (
+    <div className="relative my-1.5 rounded-[10px] border border-indigo-200/80 bg-white overflow-hidden">
+      <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-indigo-500" />
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-indigo-200/60 bg-indigo-50/60">
+        <Waypoints className="h-3.5 w-3.5 text-indigo-600" />
+        <span className="text-[12px] font-semibold text-indigo-900">Handoff</span>
+        {traceId && (
+          <span className="text-[9.5px] font-mono text-zinc-400" title={String(payload.traceId)}>
+            {traceId}
+          </span>
+        )}
+        {evidence && (
+          <span className="tag-badge ml-auto bg-zinc-100 text-zinc-500">{evidence}</span>
+        )}
+      </div>
+      <div className="p-3 space-y-1.5">
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[10.5px] text-zinc-400 mr-0.5">→</span>
+          {to.map((name, i) => (
+            <span key={`${name}-${i}`} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10.5px] bg-indigo-50 text-indigo-700 border border-indigo-200/80">
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ background: AGENT_ROLE_COLORS[name.toLowerCase()] ?? "#94a3b8" }}
+              />
+              @{name}
+            </span>
+          ))}
+          {intent && (
+            <span className="tag-badge bg-indigo-50 text-indigo-600">{intent}</span>
+          )}
+          {schema && (
+            <span className="tag-badge bg-slate-100 text-slate-600">out:{schema}</span>
+          )}
+        </div>
+        {taskSummary && (
+          <p className="text-[12.5px] text-zinc-700 leading-relaxed line-clamp-4">{taskSummary}</p>
+        )}
+        {constraints && (constraints.maxTokens != null || constraints.deadlineMs != null) && (
+          <p className="text-[10px] text-zinc-400">
+            {constraints.maxTokens != null && <span className="mr-2">budget ≤{String(constraints.maxTokens)} tokens</span>}
+            {constraints.deadlineMs != null && <span>deadline {(Number(constraints.deadlineMs) / 1000).toFixed(0)}s</span>}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function DiffCard({
   authorName,
@@ -143,7 +284,30 @@ function DiffCard({
   );
 }
 
-function ReviewLane({ findings }: { findings: Finding[] }) {
+function ReviewLane({ roomId, messageId, findings, onOptimistic }: {
+  roomId: string;
+  messageId: string;
+  findings: Finding[];
+  onOptimistic?: (index: number | "all", decision: "accepted" | "rejected") => void;
+}) {
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  const decide = useCallback(async (index: number | "all", decision: "accepted" | "rejected") => {
+    const key = `${index}:${decision}`;
+    if (busyKey) return;
+    setBusyKey(key);
+    onOptimistic?.(index, decision);
+    try {
+      await api.decideFinding(roomId, messageId, index, decision);
+    } catch {
+      /* server broadcast will reconcile; decisions surface via message.updated */
+    } finally {
+      setBusyKey(null);
+    }
+  }, [busyKey, roomId, messageId, onOptimistic]);
+
+  const allDecided = findings.every(f => f.decision);
+
   return (
     <div className="my-1.5 space-y-1">
       <div className="flex items-center gap-2 px-1">
@@ -156,19 +320,58 @@ function ReviewLane({ findings }: { findings: Finding[] }) {
       <div className="flex flex-col gap-1">
         {findings.map((f, idx) => {
           const sev = SEVERITY_STYLE[f.severity] ?? SEVERITY_STYLE.minor;
+          const decided = f.decision === "accepted" || f.decision === "rejected";
           return (
             <div
               key={idx}
-              className="relative pl-3 pr-3 py-1.5 bg-white border border-zinc-200/80 rounded-lg overflow-hidden"
+              className={cn(
+                "group/f relative pl-3 pr-3 py-1.5 bg-white border border-zinc-200/80 rounded-lg overflow-hidden transition-opacity",
+                decided && "opacity-60"
+              )}
             >
               <span
                 className={cn("absolute left-0 top-0 bottom-0 w-1", sev.bar)}
               />
               <div className="flex items-center gap-2 mb-0.5">
                 <span className={cn("tag-badge", sev.badge)}>{f.severity}</span>
-                <span className="text-[12px] font-medium text-zinc-900">
+                {f.decision && (
+                  <span
+                    className={cn(
+                      "tag-badge",
+                      f.decision === "accepted"
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        : "bg-zinc-100 text-zinc-500 border-zinc-200"
+                    )}
+                  >
+                    {f.decision}
+                  </span>
+                )}
+                <span className={cn(
+                  "text-[12px] font-medium text-zinc-900",
+                  f.decision === "rejected" && "line-through decoration-zinc-400"
+                )}>
                   {f.title}
                 </span>
+                {!decided && (
+                  <span className="ml-auto flex items-center gap-0.5 opacity-0 group-hover/f:opacity-100 transition-opacity shrink-0">
+                    <button
+                      onClick={() => decide(idx, "rejected")}
+                      disabled={!!busyKey}
+                      title="Reject finding"
+                      className="h-5 w-5 rounded flex items-center justify-center text-zinc-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                    <button
+                      onClick={() => decide(idx, "accepted")}
+                      disabled={!!busyKey}
+                      title="Accept finding — queue a rework"
+                      className="h-5 w-5 rounded flex items-center justify-center text-zinc-400 hover:text-emerald-600 hover:bg-emerald-50 disabled:opacity-40"
+                    >
+                      <Check className="h-3 w-3" />
+                    </button>
+                  </span>
+                )}
               </div>
               {f.location && (
                 <div className="flex items-center gap-1 text-[11px] text-zinc-500 mb-0.5">
@@ -194,14 +397,24 @@ function ReviewLane({ findings }: { findings: Finding[] }) {
           );
         })}
       </div>
-      <div className="flex items-center gap-1.5 px-1 pt-0.5">
-        <button className="text-[10.5px] font-medium px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100">
-          Accept all
-        </button>
-        <button className="text-[10.5px] font-medium px-2 py-0.5 rounded-md bg-zinc-50 text-zinc-700 border border-zinc-200 hover:bg-zinc-100">
-          Reject all
-        </button>
-      </div>
+      {!allDecided && (
+        <div className="flex items-center gap-1.5 px-1 pt-0.5">
+          <button
+            onClick={() => decide("all", "rejected")}
+            disabled={!!busyKey}
+            className="text-[10.5px] font-medium px-2 py-0.5 rounded-md bg-zinc-50 text-zinc-700 border border-zinc-200 hover:bg-zinc-100 disabled:opacity-50"
+          >
+            Reject all
+          </button>
+          <button
+            onClick={() => decide("all", "accepted")}
+            disabled={!!busyKey}
+            className="text-[10.5px] font-medium px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50"
+          >
+            Accept all{busyKey === `all:accepted` ? "…" : ""}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -209,11 +422,20 @@ function ReviewLane({ findings }: { findings: Finding[] }) {
 function QuestionCard({
   authorName,
   content,
+  onReply,
 }: {
   authorName: string;
   content: string;
+  onReply?: (text: string, targetAgentName: string) => void;
 }) {
   const body = stripTag(content, "QUESTION");
+  const [draft, setDraft] = useState("");
+  const submit = () => {
+    const text = draft.trim();
+    if (!text || !onReply) return;
+    onReply(text, authorName);
+    setDraft("");
+  };
   return (
     <div className="relative my-1.5 rounded-[10px] border border-cyan-200/80 bg-white overflow-hidden">
       <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-cyan-500" />
@@ -230,12 +452,22 @@ function QuestionCard({
         <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-zinc-200 rounded-md focus-within:border-cyan-400 focus-within:ring-2 focus-within:ring-cyan-100">
           <input
             type="text"
-            placeholder="Reply…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            placeholder={`Reply to @${authorName}…`}
             className="flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-zinc-400"
           />
           <button
             type="button"
-            className="h-6 w-6 rounded-md bg-cyan-600 text-white flex items-center justify-center hover:bg-cyan-700 text-[12px] leading-none"
+            onClick={submit}
+            disabled={!draft.trim()}
+            className="h-6 w-6 rounded-md bg-cyan-600 text-white flex items-center justify-center hover:bg-cyan-700 disabled:opacity-40 text-[12px] leading-none"
           >
             ↑
           </button>
@@ -372,6 +604,11 @@ const markdownComponents = {
   code({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) {
     const isInline = !className;
     if (isInline) return <code className={className} {...props}>{children}</code>;
+    // ```handoff fenced blocks become structured HandoffCards
+    if (/language-handoff/i.test(className)) {
+      const payload = parseHandoffBlock(String(children));
+      if (payload) return <HandoffCard payload={payload} />;
+    }
     return <CodeBlock className={className}>{children}</CodeBlock>;
   },
   img({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
@@ -388,9 +625,20 @@ const markdownComponents = {
   },
 };
 
-function TodoCard({ content }: { content: string }) {
+function TodoCard({ content, messageId }: { content: string; messageId: string }) {
   const body = stripTag(content, "TODO");
-  const [checked, setChecked] = useState(false);
+  // Persist checkbox across re-renders / room switches. Keyed by message id +
+  // body hash so multiple TODO cards in one message don't collide.
+  const storageKey = `atelier-todo:${messageId}:${hashString(body)}`;
+  const [checked, setChecked] = useState(() => {
+    try { return localStorage.getItem(storageKey) === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try {
+      if (checked) localStorage.setItem(storageKey, "1");
+      else localStorage.removeItem(storageKey);
+    } catch { /* private mode */ }
+  }, [checked, storageKey]);
   return (
     <div className="relative my-1.5 rounded-[10px] border border-amber-200/80 bg-white overflow-hidden">
       <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-amber-500" />
@@ -464,9 +712,31 @@ export const MessageItem = memo(function MessageItem({
   mentionedAgents = [],
   isGrouped,
   index = 0,
+  onReply,
+  onShowChain,
 }: Props) {
   const isUser = message.authorId === "user";
-  const findings: Finding[] = message.findings ?? [];
+  // Inline handoff JSON → structured card (non-user messages only).
+  const extracted = isUser
+    ? { payload: null as Record<string, unknown> | null, remainder: message.content }
+    : extractInlineHandoff(message.content);
+  const displayContent = extracted.payload ? extracted.remainder : message.content;
+
+  // Optimistic finding decisions: applied locally immediately, then replaced
+  // by the authoritative message.updated broadcast from the server.
+  const [pendingFindings, setPendingFindings] = useState<Finding[] | null>(null);
+  useEffect(() => { setPendingFindings(null); }, [message.id]);
+  const findings: Finding[] = pendingFindings ?? message.findings ?? [];
+
+  const handleDecide = useCallback((idx: number | "all", decision: "accepted" | "rejected") => {
+    setPendingFindings(curr => {
+      const base = curr ?? (message.findings ?? []);
+      return base.map((f, i) =>
+        idx === "all" || i === idx ? { ...f, decision } : f
+      );
+    });
+  }, [message.findings]);
+
   const [copied, setCopied] = useState(false);
   const staggerDelay = Math.min(index * 30, 150);
 
@@ -498,7 +768,13 @@ export const MessageItem = memo(function MessageItem({
         );
       case "REVIEW":
         return findings.length > 0 ? (
-          <ReviewLane key={tag} findings={findings} />
+          <ReviewLane
+            key={tag}
+            roomId={message.roomId}
+            messageId={message.id}
+            findings={findings}
+            onOptimistic={handleDecide}
+          />
         ) : null;
       case "QUESTION":
         return (
@@ -506,6 +782,11 @@ export const MessageItem = memo(function MessageItem({
             key={tag}
             authorName={authorName}
             content={message.content}
+            onReply={(text, target) => {
+              // Reply routes back to the asking agent via @mention so the
+              // server's mention routing picks it up.
+              onReply?.(`@${target} ${text}`, target);
+            }}
           />
         );
       case "DECISION":
@@ -525,7 +806,7 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case "TODO":
-        return <TodoCard key={tag} content={message.content} />;
+        return <TodoCard key={tag} content={message.content} messageId={message.id} />;
       case "STATUS":
         return null;
       default:
@@ -602,21 +883,31 @@ export const MessageItem = memo(function MessageItem({
                 )}
               >
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                  {message.content}
+                  {displayContent}
                 </ReactMarkdown>
               </div>
 
-              <button
-                onClick={copy}
-                className={cn(
-                  "absolute -top-3 opacity-0 group-hover:opacity-100 transition-opacity",
-                  "h-6 w-6 rounded-md bg-white border border-zinc-200 shadow-sm flex items-center justify-center text-zinc-500 hover:text-zinc-900",
-                  isUser ? "-left-7" : "-right-7"
+              <div className={cn(
+                "absolute -top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity",
+                isUser ? "-left-7" : "-right-7"
+              )}>
+                {!isUser && onShowChain && (
+                  <button
+                    onClick={() => onShowChain(message)}
+                    className="h-6 w-6 rounded-md bg-white border border-zinc-200 shadow-sm flex items-center justify-center text-zinc-500 hover:text-indigo-600"
+                    title="View handoff chain (trace)"
+                  >
+                    <Waypoints className="h-3 w-3" />
+                  </button>
                 )}
-                title="Copy"
-              >
-                <Copy className="h-3 w-3" />
-              </button>
+                <button
+                  onClick={copy}
+                  className="h-6 w-6 rounded-md bg-white border border-zinc-200 shadow-sm flex items-center justify-center text-zinc-500 hover:text-zinc-900"
+                  title="Copy"
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </div>
               {copied && (
                 <span
                   className={cn(
@@ -628,6 +919,12 @@ export const MessageItem = memo(function MessageItem({
                 </span>
               )}
             </div>
+
+            {extracted.payload && (
+              <div className="mt-1.5 animate-card-in">
+                <HandoffCard payload={extracted.payload} />
+              </div>
+            )}
 
             {tags.length > 0 && (
               <div

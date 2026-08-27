@@ -5,6 +5,10 @@ import { RoomSettingsDialog } from "@/components/RoomSettingsDialog";
 import { TaskEditDialog } from "@/components/TaskEditDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { HandoffChainDialog } from "@/components/chat/HandoffChainDialog";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
 import { api } from "@/lib/api";
 import { ws } from "@/lib/ws";
 import { atchDebug } from "@/lib/atch-debug";
@@ -95,6 +99,7 @@ export default function App() {
   const [confirm, setConfirm] = useState<{ title: string; description?: string; destructive?: boolean; onConfirm: () => void } | null>(null);
   const [reviewResult, setReviewResult] = useState<{ findings: Finding[]; summary: string } | null>(null);
   const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
+  const [chainMessage, setChainMessage] = useState<Message | null>(null);
 
   const currentRoom = useMemo(() => rooms.find(r => r.id === currentRoomId), [rooms, currentRoomId]);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
@@ -113,6 +118,26 @@ export default function App() {
       return updated.slice(0, MAX_ACTIVITY);
     });
   }).current;
+
+  // Desktop notification for background completions — kept in refs so the WS
+  // subscription never re-binds because of these lookups.
+  const roomRef = useRef(currentRoomId);
+  roomRef.current = currentRoomId;
+  const agentNamesRef = useRef<Record<string, string>>({});
+  agentNamesRef.current = Object.fromEntries(agents.map(a => [a.id, a.name]));
+  const notifyIfHidden = useCallback((roomId: string, agentId: string, verb: string, detail?: string) => {
+    if (typeof Notification === "undefined") return;
+    if (!document.hidden && roomId === roomRef.current) return; // user is watching this room
+    try {
+      if (Notification.permission !== "granted") return;
+      const name = agentNamesRef.current[agentId] ?? "Agent";
+      const n = new Notification(`@${name} ${verb}`, {
+        body: detail ?? "Task finished in Atelier",
+        tag: `atelier-${roomId}-${agentId}`,
+      });
+      setTimeout(() => n.close(), 6000);
+    } catch { /* notifications unavailable */ }
+  }, []);
 
   // Initial load
   useEffect(() => {
@@ -159,6 +184,23 @@ export default function App() {
     });
     return unsub;
   }, [currentRoomId]);
+
+  // Desktop notifications — request permission lazily on first interaction;
+  // notify when an agent finishes/fails in the background (tab hidden).
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    const ask = () => {
+      if (Notification.permission === "default") Notification.requestPermission().catch(() => {});
+      window.removeEventListener("pointerdown", ask);
+      window.removeEventListener("keydown", ask);
+    };
+    window.addEventListener("pointerdown", ask, { once: true });
+    window.addEventListener("keydown", ask, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", ask);
+      window.removeEventListener("keydown", ask);
+    };
+  }, []);
 
   // Load room data when room changes
   useEffect(() => {
@@ -379,6 +421,7 @@ export default function App() {
             message: `Finished in ${(p.elapsedMs ?? 0)}ms`,
             meta: { elapsedMs: p.elapsedMs },
           });
+          notifyIfHidden(p.roomId, p.agentId, "finished", p.elapsedMs ? `${(p.elapsedMs / 1000).toFixed(1)}s` : undefined);
           break;
         }
         case "agent.error": {
@@ -408,6 +451,7 @@ export default function App() {
             agentId: p.agentId,
             message: p.error,
           });
+          notifyIfHidden(p.roomId, p.agentId, "failed", p.error?.slice(0, 120));
           break;
         }
         case "self_talk.tick": {
@@ -592,16 +636,47 @@ export default function App() {
     }
   }, [currentRoomId, messages, currentRoom]);
 
-  const handleExport = useCallback(() => {
+  const download = useCallback((content: string, ext: string, mime: string) => {
     if (!currentRoom) return;
-    const blob = new Blob([JSON.stringify({ room: currentRoom, messages, tasks }, null, 2)], { type: "application/json" });
+    const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${currentRoom.name}-${Date.now()}.json`;
+    a.download = `${currentRoom.name}-${Date.now()}.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [currentRoom, messages, tasks]);
+  }, [currentRoom]);
+
+  const agentNamesById = useMemo(
+    () => new Map(agents.map(a => [a.id, a])),
+    [agents]
+  );
+
+  const handleExport = useCallback(() => {
+    if (!currentRoom) return;
+    // Markdown transcript — the native format of the room content.
+    const lines: string[] = [
+      `# ${currentRoom.name}`,
+      currentRoom.topic ? `> ${currentRoom.topic}` : "",
+      "",
+    ];
+    for (const m of messages) {
+      const who = m.authorId === "user" ? "You" : (agentNamesById.get(m.authorId)?.name ?? m.authorId);
+      lines.push(`**${who}** · ${new Date(m.timestamp).toLocaleString()}`, "", m.content.trim(), "", "---", "");
+    }
+    if (tasks.length > 0) {
+      lines.push("## Tasks", "");
+      for (const t of tasks) {
+        lines.push(`- [${t.status === "done" ? "x" : " "}] ${t.title} (${t.status})`);
+      }
+    }
+    download(lines.join("\n"), "md", "text/markdown;charset=utf-8");
+  }, [currentRoom, messages, tasks, agentNamesById, download]);
+
+  const handleExportJson = useCallback(() => {
+    if (!currentRoom) return;
+    download(JSON.stringify({ room: currentRoom, messages, tasks }, null, 2), "json", "application/json");
+  }, [currentRoom, messages, tasks, download]);
 
   const handleToggleSelfTalk = useCallback(() => {
     if (!currentRoomId) return;
@@ -711,6 +786,7 @@ export default function App() {
         onToggleSelfTalk={handleToggleSelfTalk}
         onReview={handleReview}
         onExport={handleExport}
+        onExportJson={handleExportJson}
         onClearRoom={handleClearRoom}
         onDeleteRoom={handleDeleteRoom}
         onRoomSettings={() => setSettingsOpen(true)}
@@ -725,6 +801,7 @@ export default function App() {
         onCreateProject={handleCreateProject}
         onDeleteProject={handleDeleteProject}
         onMoveRoom={handleMoveRoom}
+        onShowChain={(m) => setChainMessage(m)}
         memoryEntries={memoryEntries}
       />
 
@@ -744,11 +821,43 @@ export default function App() {
         />
       )}
       {reviewResult && (
-        <div className="fixed bottom-20 right-4 bg-popover border rounded-lg p-4 max-w-md shadow-xl z-50">
-          <div className="font-semibold text-sm mb-2">Review: {reviewResult.summary}</div>
-          <button className="text-xs underline" onClick={() => setReviewResult(null)}>close</button>
-        </div>
+        <Dialog open onOpenChange={v => !v && setReviewResult(null)}>
+          <DialogContent className="max-w-lg max-h-[70vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="text-base">Proserpina review</DialogTitle>
+              <DialogDescription>{reviewResult.summary}</DialogDescription>
+            </DialogHeader>
+            {reviewResult.findings.length === 0 ? (
+              <p className="text-[13px] text-zinc-500">No findings — clean pass.</p>
+            ) : (
+              <ul className="space-y-2">
+                {reviewResult.findings.map((f, i) => (
+                  <li key={i} className="rounded-lg border border-zinc-200 px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <span className={`tag-badge ${
+                        f.severity === "critical" ? "bg-red-50 text-red-700 border-red-200"
+                        : f.severity === "major" ? "bg-amber-50 text-amber-700 border-amber-200"
+                        : "bg-sky-50 text-sky-700 border-sky-200"}`}>
+                        {f.severity}
+                      </span>
+                      <span className="text-[12.5px] font-medium text-zinc-800">{f.title}</span>
+                    </div>
+                    {f.suggested && (
+                      <p className="mt-1 text-[11.5px] text-emerald-700">→ {f.suggested}</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </DialogContent>
+        </Dialog>
       )}
+      <HandoffChainDialog
+        open={!!chainMessage}
+        onClose={() => setChainMessage(null)}
+        message={chainMessage}
+        agents={agents}
+      />
       <Toaster />
     </>
     </ErrorBoundary>

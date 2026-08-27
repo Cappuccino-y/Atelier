@@ -77,6 +77,48 @@ export async function routes(app: FastifyInstance) {
       return updated;
     }
   );
+
+  // Finding lifecycle — accept/reject a single finding (by index) or all at
+  // once. Persists the decision on the message row so it survives reloads and
+  // re-broadcasts the findings state to every connected client.
+  app.patch<{ Params: { roomId: string; messageId: string }; Body: { index: number | "all"; decision: "accepted" | "rejected" } }>(
+    "/api/rooms/:roomId/messages/:messageId/findings",
+    async (req, reply) => {
+      const { decision } = req.body;
+      const index = req.body.index;
+      if (decision !== "accepted" && decision !== "rejected") {
+        return reply.code(400).send({ error: "decision must be accepted|rejected" });
+      }
+
+      const row = db.prepare("SELECT * FROM messages WHERE id = ?").get(req.params.messageId) as any;
+      if (!row) return reply.code(404).send({ error: "message not found" });
+
+      let findings: any[] = [];
+      try { findings = JSON.parse(row.findings || "[]"); } catch { findings = []; }
+      if (findings.length === 0) return reply.code(409).send({ error: "message has no findings" });
+
+      if (index === "all") {
+        for (const f of findings) f.decision = decision;
+      } else {
+        if (!Number.isInteger(index) || (index as number) < 0 || (index as number) >= findings.length) {
+          return reply.code(400).send({ error: `index out of range (0..${findings.length - 1})` });
+        }
+        findings[index].decision = decision;
+      }
+
+      db.prepare("UPDATE messages SET findings = ? WHERE id = ?")
+        .run(JSON.stringify(findings), req.params.messageId);
+
+      const updated = normalizeMessage(db.prepare("SELECT * FROM messages WHERE id = ?").get(req.params.messageId) as any);
+      sendAll(decision === "accepted" ? "finding.accepted" : "finding.rejected", {
+        roomId: req.params.roomId,
+        messageId: req.params.messageId,
+        index,
+      });
+      sendAll("message.updated", updated);
+      return updated;
+    }
+  );
 }
 
 function normalizeMessage(m: any) {

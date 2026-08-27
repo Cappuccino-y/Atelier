@@ -1,25 +1,31 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Activity, Users, Brain, Wrench, Pause, Sparkles, CheckCircle2,
-  AlertCircle, ArrowRight, Hand, Circle, Zap,
+  AlertCircle, ArrowRight, Hand, Circle, Zap, KanbanSquare, Plus,
+  ChevronRight, Trash2, ListTodo, PlayCircle, Lock, X,
 } from "lucide-react";
-import type { ActivityEvent, Agent, Room, MemoryEntry } from "@/types";
+import type { ActivityEvent, Agent, Room, MemoryEntry, Task } from "@/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
-type Tab = "live" | "agents" | "memory" | "tools";
+type Tab = "live" | "tasks" | "agents" | "memory" | "tools";
 
 type Props = {
   room: Room;
   activities?: ActivityEvent[];
   agents: Agent[];
   memoryEntries: MemoryEntry[];
+  tasks: Task[];
+  onCreateTask?: (title: string) => void;
+  onUpdateTask?: (id: string, patch: Partial<Task>) => void;
+  onDeleteTask?: (id: string) => void;
   onStopAll?: () => void;
 };
 
 export function RightPanel({
-  room, activities = [], agents, memoryEntries, onStopAll,
+  room, activities = [], agents, memoryEntries,
+  tasks = [], onCreateTask, onUpdateTask, onDeleteTask, onStopAll,
 }: Props) {
   const [tab, setTab] = useState<Tab>("live");
   const [widthPx, setWidthPx] = useState(320);
@@ -46,8 +52,16 @@ export function RightPanel({
     document.addEventListener("mouseup", onMouseUp);
   }, []);
 
-  const tabs: Array<{ id: Tab; label: string; icon: any }> = [
-    { id: "live", label: "Live", icon: Activity },
+  // noise badge on Live tab so you know there's motion even in another tab
+  const liveCount = useMemo(
+    () => activities.filter(a => a.roomId === room.id).length,
+    [activities, room.id]
+  );
+  const openTasks = tasks.filter(t => t.status !== "done").length;
+
+  const tabs: Array<{ id: Tab; label: string; icon: any; badge?: number }> = [
+    { id: "live", label: "Live", icon: Activity, badge: liveCount || undefined },
+    { id: "tasks", label: "Tasks", icon: KanbanSquare, badge: openTasks || undefined },
     { id: "agents", label: "Agents", icon: Users },
     { id: "memory", label: "Memory", icon: Brain },
     { id: "tools", label: "Tools", icon: Wrench },
@@ -81,6 +95,11 @@ export function RightPanel({
                 >
                   <Icon className="h-3 w-3" />
                   <span>{t.label}</span>
+                  {!active && t.badge != null && (
+                    <span className="ml-0.5 min-w-[14px] px-1 h-[14px] rounded-full bg-zinc-100 text-zinc-500 text-[9px] font-semibold leading-[14px] text-center">
+                      {t.badge > 99 ? "99+" : t.badge}
+                    </span>
+                  )}
                   {active && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-indigo-500" />}
                 </button>
               );
@@ -90,6 +109,15 @@ export function RightPanel({
 
         <div className="flex-1 min-h-0 overflow-hidden">
           {tab === "live" && <LiveTab room={room} activities={activities} agents={agents} onStopAll={onStopAll} />}
+          {tab === "tasks" && (
+            <TasksTab
+              tasks={tasks}
+              agents={agents}
+              onCreateTask={onCreateTask}
+              onUpdateTask={onUpdateTask}
+              onDeleteTask={onDeleteTask}
+            />
+          )}
           {tab === "agents" && <AgentsTab room={room} agents={agents} activities={activities} />}
           {tab === "memory" && <MemoryTab entries={memoryEntries} />}
           {tab === "tools" && <ToolsTab activities={activities} room={room} />}
@@ -99,7 +127,183 @@ export function RightPanel({
   );
 }
 
+/* ---------- Tasks Tab ---------- */
+
+const STATUS_ORDER: Array<Task["status"]> = ["todo", "doing", "blocked", "done"];
+const STATUS_META: Record<Task["status"], { label: string; icon: any; badge: string }> = {
+  todo: { label: "Todo", icon: ListTodo, badge: "bg-zinc-100 text-zinc-600 border-zinc-200" },
+  doing: { label: "Doing", icon: PlayCircle, badge: "bg-sky-50 text-sky-700 border-sky-200" },
+  blocked: { label: "Blocked", icon: Lock, badge: "bg-red-50 text-red-700 border-red-200" },
+  done: { label: "Done", icon: CheckCircle2, badge: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+};
+
+function TasksTab({ tasks, agents, onCreateTask, onUpdateTask, onDeleteTask }: {
+  tasks: Task[];
+  agents: Agent[];
+  onCreateTask?: (title: string) => void;
+  onUpdateTask?: (id: string, patch: Partial<Task>) => void;
+  onDeleteTask?: (id: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const agentMap = new Map(agents.map(a => [a.id, a]));
+
+  const submit = () => {
+    const title = draft.trim();
+    if (!title || !onCreateTask) return;
+    onCreateTask(title);
+    setDraft("");
+  };
+
+  const grouped = useMemo(() => {
+    const g = new Map<Task["status"], Task[]>();
+    for (const s of STATUS_ORDER) g.set(s, []);
+    for (const t of tasks) (g.get(t.status ?? "todo") ?? []).push(t);
+    for (const s of STATUS_ORDER) g.get(s)!.sort((a, b) => a.createdAt - b.createdAt);
+    return g;
+  }, [tasks]);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="p-2 border-b border-zinc-200/60 bg-white shrink-0">
+        <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-zinc-200 rounded-md focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100">
+          <Plus className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
+            }}
+            placeholder="Add a task…"
+            className="flex-1 bg-transparent text-[12px] outline-none placeholder:text-zinc-400"
+          />
+          {draft.trim() && (
+            <button
+              onClick={submit}
+              className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+            >
+              Add
+            </button>
+          )}
+        </div>
+      </div>
+
+      <ScrollArea className="flex-1">
+        <div className="p-2 space-y-3">
+          {tasks.length === 0 ? (
+            <Empty icon={KanbanSquare} title="No tasks yet" desc="Create a task above or ask an agent to add one." />
+          ) : (
+            STATUS_ORDER.map(status => {
+              const list = grouped.get(status)!;
+              if (list.length === 0) return null;
+              const meta = STATUS_META[status];
+              const Icon = meta.icon;
+              return (
+                <div key={status}>
+                  <div className="flex items-center gap-1.5 px-1 mb-1">
+                    <Icon className="h-3 w-3 text-zinc-400" />
+                    <span className="text-[10.5px] font-semibold uppercase tracking-wide text-zinc-500">{meta.label}</span>
+                    <span className="text-[10px] text-zinc-400">{list.length}</span>
+                  </div>
+                  <div className="space-y-1">
+                    {list.map(t => {
+                      const assignee = t.assigneeId ? agentMap.get(t.assigneeId) : undefined;
+                      const nextStatus = STATUS_ORDER[(STATUS_ORDER.indexOf(t.status) + 1) % STATUS_ORDER.length];
+                      return (
+                        <div
+                          key={t.id}
+                          className={cn(
+                            "group relative flex items-start gap-2 pl-2 pr-1 py-1.5 rounded-lg border bg-white transition-colors",
+                            status === "done" ? "border-zinc-200/60 opacity-70" : "border-zinc-200/80 hover:border-indigo-200"
+                          )}
+                        >
+                          <button
+                            onClick={() => onUpdateTask?.(t.id, { status: nextStatus })}
+                            title={`Move to ${STATUS_META[nextStatus].label}`}
+                            className="mt-0.5 shrink-0"
+                          >
+                            {status === "done" ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                            ) : (
+                              <Circle className="h-3.5 w-3.5 text-zinc-300 hover:text-indigo-400 transition-colors" />
+                            )}
+                          </button>
+                          <div className="min-w-0 flex-1">
+                            <p className={cn("text-[12px] leading-snug text-zinc-800 break-words", status === "done" && "line-through decoration-zinc-400")}>
+                              {t.title}
+                            </p>
+                            {assignee && (
+                              <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-zinc-400">
+                                <span className="h-1.5 w-1.5 rounded-full" style={{ background: assignee.color }} />
+                                @{assignee.name}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                            {status !== "done" && (
+                              <button
+                                onClick={() => onUpdateTask?.(t.id, { status: nextStatus })}
+                                title={`→ ${STATUS_META[nextStatus].label}`}
+                                className="h-5 w-5 rounded flex items-center justify-center text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50"
+                              >
+                                <ChevronRight className="h-3 w-3" />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => onDeleteTask?.(t.id)}
+                              title="Delete task"
+                              className="h-5 w-5 rounded flex items-center justify-center text-zinc-400 hover:text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
 /* ---------- Live Tab ---------- */
+
+type GroupedActivity =
+  | { type: "single"; event: ActivityEvent }
+  | { type: "tool-run"; events: ActivityEvent[] };
+
+/**
+ * Collapse consecutive identical tool calls (same agent + same tool) into a
+ * single expandable run row so polling-heavy agents don't flood the feed.
+ */
+function groupActivities(orderedDesc: ActivityEvent[]): GroupedActivity[] {
+  const out: GroupedActivity[] = [];
+  let i = 0;
+  while (i < orderedDesc.length) {
+    const e = orderedDesc[i];
+    if (e.kind === "agent.tool_call") {
+      let j = i + 1;
+      while (
+        j < orderedDesc.length &&
+        orderedDesc[j].kind === "agent.tool_call" &&
+        orderedDesc[j].agentId === e.agentId &&
+        String(orderedDesc[j].meta?.tool) === String(e.meta?.tool)
+      ) j++;
+      if (j - i > 2) {
+        out.push({ type: "tool-run", events: orderedDesc.slice(i, j) });
+        i = j;
+        continue;
+      }
+    }
+    out.push({ type: "single", event: e });
+    i++;
+  }
+  return out;
+}
 
 function LiveTab({ room, activities, agents, onStopAll }: {
   room: Room; activities: ActivityEvent[]; agents: Agent[]; onStopAll?: () => void;
@@ -116,6 +320,7 @@ function LiveTab({ room, activities, agents, onStopAll }: {
   thinking.forEach(id => outstanding.add(id));
 
   const ordered = [...roomActs].sort((a, b) => b.timestamp - a.timestamp);
+  const grouped = useMemo(() => groupActivities(ordered), [ordered]);
 
   return (
     <div className="flex flex-col h-full">
@@ -129,17 +334,72 @@ function LiveTab({ room, activities, agents, onStopAll }: {
       )}
       <ScrollArea className="flex-1">
         <div className="p-2 space-y-0.5">
-          {ordered.length === 0 ? (
+          {grouped.length === 0 ? (
             <Empty icon={Sparkles} title="Awaiting first signal" desc="Agent activity appears here as the team works." />
           ) : (
-            ordered.map(e => (
-              <ActivityRow key={e.id} event={e}
-                agent={e.agentId ? agentMap.get(e.agentId) : undefined}
-                isThinking={!!(e.agentId && outstanding.has(e.agentId))} />
-            ))
+            grouped.map(g =>
+              g.type === "single" ? (
+                <ActivityRow key={g.event.id} event={g.event}
+                  agent={g.event.agentId ? agentMap.get(g.event.agentId) : undefined}
+                  isThinking={!!(g.event.agentId && outstanding.has(g.event.agentId))} />
+              ) : (
+                <ToolRunRow key={g.events[0].id} events={g.events}
+                  agent={g.events[0].agentId ? agentMap.get(g.events[0].agentId) : undefined} />
+              )
+            )
           )}
         </div>
       </ScrollArea>
+    </div>
+  );
+}
+
+function ToolRunRow({ events, agent }: { events: ActivityEvent[]; agent?: Agent }) {
+  const [open, setOpen] = useState(false);
+  const name = agent?.name ?? "Agent";
+  const tool = String(events[0].meta?.tool ?? "tool");
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className={cn(
+          "group relative flex gap-2 px-2 py-1.5 rounded-md border border-transparent transition-colors w-full text-left",
+          open ? "bg-white border-zinc-200/80" : "hover:bg-white hover:border-zinc-200/80"
+        )}
+      >
+        <div className="shrink-0 mt-0.5">
+          {agent ? (
+            <span className="block h-1.5 w-1.5 rounded-full ring-2 ring-white shadow-sm" style={{ backgroundColor: agent.color }} title={name} />
+          ) : (
+            <span className="h-3.5 w-3.5 rounded-full bg-zinc-100 text-zinc-500 flex items-center justify-center">
+              <Wrench className="h-2.5 w-2.5" />
+            </span>
+          )}
+        </div>
+        <div className="min-w-0 flex-1 flex items-baseline justify-between gap-2">
+          <span className="text-[12px] leading-snug font-medium text-zinc-700 truncate">
+            {name} → <code className="font-mono text-[11px]">{tool}</code>
+            <span className="ml-1.5 text-[10px] font-semibold text-zinc-400">×{events.length}</span>
+          </span>
+          <span className="text-[10px] text-zinc-400 shrink-0 tabular-nums">{formatRelativeTime(events[0].timestamp)}</span>
+        </div>
+      </button>
+      {open && (
+        <div className="ml-6 mb-1 animate-slide-down">
+          {events.slice(0, 20).map(ev => (
+            <div key={ev.id} className="flex items-center justify-between pl-2 pr-1 py-0.5">
+              <span className="text-[10.5px] text-zinc-500 flex items-center gap-1">
+                <ChevronRight className="h-2.5 w-2.5 text-zinc-300" />
+                {ev.message ?? tool}
+              </span>
+              <span className="text-[9.5px] text-zinc-300 tabular-nums">{formatRelativeTime(ev.timestamp)}</span>
+            </div>
+          ))}
+          {events.length > 20 && (
+            <p className="pl-2 text-[9.5px] text-zinc-400">…and {events.length - 20} more</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

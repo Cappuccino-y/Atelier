@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Settings, MoreHorizontal, Trash2, ScanSearch, Download, Users, Repeat2,
+  Settings, MoreHorizontal, Trash2, ScanSearch, Download, Users, Repeat2, FileJson,
 } from "lucide-react";
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
@@ -18,6 +18,7 @@ type Props = {
   onToggleSelfTalk: () => void;
   onReview: () => void;
   onExport: () => void;
+  onExportJson: () => void;
   onClear: () => void;
   onDelete: () => void;
   onSettings: () => void;
@@ -26,7 +27,7 @@ type Props = {
 
 export function RoomHeader({
   room, agents, selfTalkEnabled, activeAgentIds = [],
-  onToggleSelfTalk, onReview, onExport, onClear, onDelete, onSettings, onInvite,
+  onToggleSelfTalk, onReview, onExport, onExportJson, onClear, onDelete, onSettings, onInvite,
 }: Props) {
   const roomAgents = agents.filter(a => room.agentIds.includes(a.id));
   const visible = roomAgents.slice(0, 5);
@@ -159,7 +160,10 @@ export function RoomHeader({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
             <DropdownMenuItem onClick={onExport} className="text-[12px]">
-              <Download className="h-3.5 w-3.5 mr-2" /> Export
+              <Download className="h-3.5 w-3.5 mr-2" /> Export Markdown
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onExportJson} className="text-[12px]">
+              <FileJson className="h-3.5 w-3.5 mr-2" /> Export JSON
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onInvite} className="text-[12px]">
               <Users className="h-3.5 w-3.5 mr-2" /> Members

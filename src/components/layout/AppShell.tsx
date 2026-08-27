@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { TopBar } from "./TopBar";
 import { Sidebar } from "./Sidebar";
 import { RightPanel } from "./RightPanel";
@@ -33,6 +33,7 @@ type Props = {
   onToggleSelfTalk: () => void;
   onReview: () => void;
   onExport: () => void;
+  onExportJson: () => void;
   onClearRoom: () => void;
   onDeleteRoom: (roomId?: string) => void;
   onRoomSettings: () => void;
@@ -47,6 +48,7 @@ type Props = {
   onCreateProject: (name: string) => void;
   onDeleteProject: (id: string, name: string) => void;
   onMoveRoom: (roomId: string, projectId: string | null) => void;
+  onShowChain: (message: Message) => void;
   memoryEntries: MemoryEntry[];
 };
 
@@ -104,6 +106,15 @@ export function AppShell(props: Props) {
 
   const unreadRooms = props.rooms.filter(r => r.unread > 0).length;
 
+  // QuestionCard inline replies route through the normal send path so the
+  // server's mention routing picks up the @target.
+  const handleReply = useCallback(
+    (content: string, _targetAgentName: string) => {
+      props.onSendMessage(content, []);
+    },
+    [props.onSendMessage]
+  );
+
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       <TopBar
@@ -137,6 +148,7 @@ export function AppShell(props: Props) {
                 onToggleSelfTalk={() => { setSelfTalkEnabled(v => !v); props.onToggleSelfTalk(); }}
                 onReview={props.onReview}
                 onExport={props.onExport}
+                onExportJson={props.onExportJson}
                 onClear={props.onClearRoom}
                 onDelete={props.onDeleteRoom}
                 onSettings={props.onRoomSettings}
@@ -150,6 +162,8 @@ export function AppShell(props: Props) {
                 streamingText={props.streamingText}
                 streamingTool={props.streamingTool}
                 onStopStreaming={props.onStopStreaming}
+                onReply={handleReply}
+                onShowChain={props.onShowChain}
               />
               {props.roomLoading && (
                 <div className="px-4 py-2 text-[12px] text-zinc-400 border-t border-zinc-200/80 bg-white">
@@ -175,6 +189,10 @@ export function AppShell(props: Props) {
             activities={props.activities}
             agents={props.agents}
             memoryEntries={props.memoryEntries}
+            tasks={props.tasks.filter(t => t.roomId === props.currentRoom!.id)}
+            onCreateTask={props.onCreateTask}
+            onUpdateTask={props.onUpdateTask}
+            onDeleteTask={props.onDeleteTask}
             onStopAll={props.onStopAll}
           />
         )}

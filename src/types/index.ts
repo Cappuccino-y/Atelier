@@ -63,6 +63,8 @@ export type Finding = {
   quote?: string;
   suggested?: string;
   supportingCritics?: string[];
+  /** persisted via PATCH /api/rooms/:roomId/messages/:messageId/findings */
+  decision?: "accepted" | "rejected";
 };
 
 /* ---- Live Activity feed ----------------------------------------------- */

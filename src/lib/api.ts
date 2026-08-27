@@ -47,6 +47,31 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ emoji }),
     }),
+  decideFinding: (
+    roomId: string,
+    messageId: string,
+    index: number | "all",
+    decision: "accepted" | "rejected",
+  ) =>
+    request<Message>(`/api/rooms/${roomId}/messages/${messageId}/findings`, {
+      method: "PATCH",
+      body: JSON.stringify({ index, decision }),
+    }),
+
+  handoffChain: (messageId: string) =>
+    request<{
+      messageId: string;
+      depth: number;
+      chain: Array<{
+        messageId: string;
+        parentId: string | null;
+        authorId: string;
+        content: string;
+        tags: string[];
+        timestamp: number;
+        handoffSummary?: string;
+      }>;
+    }>(`/api/runtime/handoff-chain/${messageId}`),
 
   listTasks: (roomId: string) => request<Task[]>(`/api/rooms/${roomId}/tasks`),
   createTask: (
