@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="Atelier — 多 Agent 协作聊天室" width="100%">
+<img src="docs/assets/banner.png" alt="Atelier — 多 Agent 协作聊天室" width="100%">
 
 **与 9 位 AI 专家同处一室 —— 你 @ 一句话，他们自己派活、互相评审、交付结果。**
 
@@ -20,7 +20,7 @@
 
 <div align="center">
 
-<img src="docs/assets/ui-preview.svg" alt="Atelier 界面预览：多 Agent 房间、结构化信号卡片与 Live Activity 流" width="88%">
+<img src="docs/assets/ui-preview.png" alt="Atelier 界面预览：多 Agent 房间、结构化信号卡片与 Live Activity 流" width="88%">
 
 <sub>界面预览（高保真设计稿，按真实设计 token 还原）：@Forge 交付 <code>[RESULT]</code>（内嵌 diff）→ 自动召唤 Lens 评审 <code>[REVIEW]</code>（严重度 lane + accept/reject）→ 右侧 Live Activity 实时流水 → 命中 major 自动返工</sub>
 
@@ -137,39 +137,11 @@ POSIX 等价：`./scripts/deploy.sh --start` / `--install-opencode` / `--force-a
 
 ## 🏗️ 架构
 
-```mermaid
-flowchart LR
-    User(("👤 用户")) -- "@Forge 修一下" --> Chat
+<div align="center">
 
-    subgraph FE["🖥️ 前端 · React 19 + Vite · :5173"]
-        Chat["聊天室<br/>信号卡片 · Cmd-K"]
-        Act["Live Activity 流"]
-    end
+<img src="docs/assets/architecture.png" alt="Atelier 架构：用户 → 前端（React 19 + Vite）→ Atelier Server（Fastify 5，REST → triggers → handoff → memory KB）→ opencode runtime 真实子进程 + Proserpina 评审桥" width="100%">
 
-    subgraph SVR["⚙️ Atelier Server · Fastify 5 · :8787"]
-        WS[["WebSocket · 24 事件"]]
-        REST["REST · 11 路由"]
-        Trig["triggers.ts<br/>@提及 + 14 条隐式路由"]
-        HO["handoff.ts<br/>v2.1 typed payload · fan-out"]
-        KB[("memory KB<br/>评分检索 · deprecate 链")]
-    end
-
-    subgraph OC["🤖 opencode runtime · 真实子进程"]
-        A["🧭 Atlas · 🔨 Forge · 🔍 Lens<br/>💬 Echo · + 5 specialists"]
-    end
-
-    PB["🦾 Proserpina Bridge<br/>FastAPI :8765 · 5 critics"]
-
-    Chat <-->|"WS 实时事件"| WS
-    Act -.-> WS
-    Chat --> REST
-    REST --> Trig --> HO
-    HO -->|"invoke"| A
-    A -->|"[RESULT] / [REVIEW]"| HO
-    HO -->|"critical / major → 返工"| A
-    HO --> KB
-    REST -->|"POST /api/review"| PB
-```
+</div>
 
 一个 agent 就是一个真实的 opencode CLI 子进程 —— 没有模拟，没有假回复。server 只做编排：路由、校验、广播、兜底。
 
