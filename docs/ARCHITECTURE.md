@@ -24,7 +24,7 @@
 3. runtime.ts 解析该 agent 的模型 → spawn opencode 子进程
 4. Forge 输出 [RESULT] → 14 条隐式路由命中 → 自动召唤 Lens
 5. Lens 输出 [REVIEW] → 命中 critical/major → Forge 被拉回返工
-6. 全 minor → Atlas 收尾；全程 WS 28 种事件实时推给前端
+6. 全 minor → Atlas 收尾；全程 24 种 WS 事件实时推给前端
 ```
 
 路由优先级（首匹配命中）：
@@ -225,15 +225,25 @@ curl -X PUT http://127.0.0.1:8787/api/runtime/agent-models \
 
 ## WebSocket 事件全集
 
-server → client 共 28+ 种，按域分组：
+server → client 实际推送 **24 种**（22 种广播 + 2 种连接级单播），另有 **12 种协议预留**（前端已监听，server 待接线）。以下以 `server/src` 代码为准（`sendAll` 全量核对）。
+
+**实际推送 · 22 种广播**：
 
 | 域 | 事件 |
 |---|---|
-| 消息 | `message.created` · `messages.cleared` |
+| 消息 | `message.created` · `message.updated` |
 | 房间 | `room.created` · `room.updated` · `room.deleted` |
 | 任务 | `task.created` · `task.updated` · `task.deleted` |
-| Agent | `agent.created` · `agent.updated` · `agent.status` · `agent.thinking` · `agent.tool_call` · `agent.handoff` · `agent.completed` · `agent.error` |
-| 评审 | `review.completed` · `finding.accepted` · `finding.rejected` · `rework` · `escalation` |
-| 路由 | `routing.route` · `routing.invite` |
-| 自言自语 | `self_talk.start` · `self_talk.stop` · `self_talk.tick` |
-| 系统 | `system.warning` · `system.info` · `system.error` · `project.updated` · `activity.cleared` · `ping` · `pong` |
+| Agent | `agent.status` · `agent.thinking` · `agent.tool_call` · `agent.text_delta` · `agent.step_done` · `agent.completed` · `agent.error` |
+| 评审 | `finding.accepted` · `finding.rejected` |
+| 路由 | `routing.route` |
+| 自言自语 | `self_talk.tick` |
+| 系统 | `system.info` · `system.warning` · `project.updated` |
+
+**实际推送 · 2 种连接级单播**：`ping`（server 每 25s 心跳）· `pong`（回复客户端 ping）
+
+**协议预留 · 12 种**（前端 `src/types/index.ts` 与 `App.tsx` 已监听，server 暂无发送点）：
+
+`messages.cleared` · `agent.created` · `agent.updated` · `agent.handoff` * · `review.completed` · `rework` · `escalation` · `routing.invite` · `self_talk.start` · `self_talk.stop` · `system.error` · `activity.cleared`
+
+> \* `agent.handoff` 例外：虽不广播，但会写入 activities 表持久化（`broadcast.ts` 的 `ACTIVITY_EVENTS` 集合），Replay 回放可见。

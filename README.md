@@ -22,7 +22,7 @@
 
 <img src="docs/assets/ui-preview.svg" alt="Atelier 界面预览：多 Agent 房间、结构化信号卡片与 Live Activity 流" width="88%">
 
-<sub>一个房间的工作实况：@Forge 交付 <code>[RESULT]</code>（内嵌 diff）→ 自动召唤 Lens 评审 <code>[REVIEW]</code>（严重度 lane + accept/reject）→ 右侧 Live Activity 实时流水 → 命中 major 自动返工</sub>
+<sub>界面预览（高保真设计稿，按真实设计 token 还原）：@Forge 交付 <code>[RESULT]</code>（内嵌 diff）→ 自动召唤 Lens 评审 <code>[REVIEW]</code>（严重度 lane + accept/reject）→ 右侧 Live Activity 实时流水 → 命中 major 自动返工</sub>
 
 </div>
 
@@ -147,7 +147,7 @@ flowchart LR
     end
 
     subgraph SVR["⚙️ Atelier Server · Fastify 5 · :8787"]
-        WS[["WebSocket · 28 事件"]]
+        WS[["WebSocket · 24 事件"]]
         REST["REST · 11 路由"]
         Trig["triggers.ts<br/>@提及 + 14 条隐式路由"]
         HO["handoff.ts<br/>v2.1 typed payload · fan-out"]
@@ -268,14 +268,14 @@ POST   /api/review                   # → Proserpina 桥
 </details>
 
 <details>
-<summary><strong>WebSocket 事件（28+，点击展开）</strong></summary>
+<summary><strong>WebSocket 事件（24，点击展开）</strong></summary>
 
 按域分组全表见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#websocket-事件全集)。高频事件：
 
 ```text
-message.created · agent.thinking · agent.tool_call · agent.handoff
-agent.completed · agent.error · review.completed · finding.accepted
-finding.rejected · rework · escalation · routing.route
+message.created · message.updated · agent.thinking · agent.tool_call
+agent.text_delta · agent.step_done · agent.completed · agent.error
+finding.accepted · finding.rejected · routing.route · self_talk.tick
 ```
 
 </details>
