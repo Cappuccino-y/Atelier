@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src="docs/assets/banner.png" alt="Atelier — 多 Agent 协作聊天室" width="100%">
+<img src="docs/assets/banner.png" alt="Atelier — 多 Agent 协作交付运行时" width="100%">
 
-**与 9 位 AI 专家同处一室 —— 你 @ 一句话，他们自己派活、互相评审、交付结果。**
+**9 位专家 Agent 组成的自主交付团队 —— 结构化 Handoff 驱动任务流转，评审门禁自动拦截缺陷，全程零人工调度。**
+
+*A multi-agent delivery runtime — typed handoff protocols, automated review gates, full-chain observability. Powered by real opencode subprocesses.*
 
 [快速开始](#-快速开始) · [核心特性](#-核心特性) · [Agent 体系](#-agent-体系) · [API 参考](#-api-参考) · [路线图](#-路线图)
 
@@ -20,7 +22,7 @@
 
 <div align="center">
 
-<img src="docs/assets/ui-preview.png" alt="Atelier 界面预览：多 Agent 房间、结构化信号卡片与 Live Activity 流" width="88%">
+<img src="docs/assets/ui-preview.png" alt="Atelier 界面预览：结构化信号卡片、评审门禁与 Live Activity 流" width="88%">
 
 <sub>界面预览（高保真设计稿，按真实设计 token 还原）：@Forge 交付 <code>[RESULT]</code>（内嵌 diff）→ 自动召唤 Lens 评审 <code>[REVIEW]</code>（严重度 lane + accept/reject）→ 右侧 Live Activity 实时流水 → 命中 major 自动返工</sub>
 
@@ -28,25 +30,37 @@
 
 ---
 
+## 🎯 Atelier 是什么
+
+一个多 Agent 协作交付运行时：下达目标，任务在 9 位专家 Agent 之间自动流转，评审门禁保证质量，每一步可观测、可回溯。
+
+- **编排** — Atlas 纯路由调度；14 条隐式 Handoff 路由驱动任务流转，失败兜底 chain + 链深 / 频次上限防循环失控
+- **执行** — 每个 Agent 是真实的 opencode CLI 子进程：写代码、跑命令、看截图，没有模拟
+- **质量门禁** — Lens 评审产出严重度分级的 `[REVIEW]`，critical / major 自动打回返工；Proserpina 桥叠加 5 个异构 critic 交叉加压
+- **记忆** — Archivist 唯一写权限；经验按 scope 分层沉淀，评分检索、可废弃、跨会话自动注入
+- **可观测** — 24 种 WebSocket 事件实时直播每个 Agent 的思考与工具调用；`handoff-chain` API 还原任意任务的完整执行链
+
+---
+
 ## ✨ 核心特性
 
-**🧩 真·多 Agent 协作** — 每个 agent 是真实的 opencode CLI 子进程，不是 mock。9 位专家按 persona 分工：Atlas 编排、Forge 实现、Lens 评审、Echo 兜底、Scout 调研……
+**🧩 真实运行时** — 每个 agent 是真实的 opencode CLI 子进程，不是 mock。9 位专家按 persona 分工：Atlas 编排、Forge 实现、Lens 评审、Echo 兜底、Scout 调研……
 
-**🔁 隐式交接** — Forge 抛出 `[RESULT]`，Lens 自动被召唤评审；命中 `critical` / `major` 自动把 Forge 拉回返工，全程零人工调度。
+**🔁 结构化 Handoff 协议** — 显式 `@提及` + 14 条隐式路由双通道：Forge 抛出 `[RESULT]` 即自动召唤 Lens 评审；另设失败兜底 chain 与调用频次 / 链深上限，防循环失控。
+
+**🛡️ 评审门禁** — `[REVIEW]` 按 critical / major / minor 分级，命中门禁自动把 Forge 拉回返工，全程零人工调度；Proserpina 桥 5 个 Python critic（Methodologist / Devil's Advocate / Editor / Domain Expert / Red Team）可对任意输出交叉加压评审。
 
 **🏷️ 结构化信号卡片** — 12 种 tag 各有专属 UI 形态：`[RESULT]` 内嵌 diff、`[REVIEW]` 严重度 lane + accept/reject、`[QUESTION]` 内联回复框、`[BLOCKER]` 醒目告警。
 
-**📡 Live Activity 流** — `thinking` / `tool_call` / `handoff` / `completed` / `error` 实时时间线，agent 正在想什么、调了什么工具一目了然。
+**📡 全链路可观测** — `thinking` / `tool_call` / `handoff` / `completed` / `error` 实时时间线，agent 正在想什么、调了什么工具一目了然；`handoff-chain` API 追溯任意任务链。
 
-**🧠 长记忆 KB** — 经验按 scope（global / room / agent / project）沉淀，评分检索 + deprecate 链，跨房间、跨重启自动注入。
+**🧠 分层记忆 KB** — 经验按 scope（global / room / agent / project）沉淀，评分检索 + deprecate 链，跨空间、跨重启自动注入。
 
-**⚙️ Per-Agent 模型热切换** — `agent-models.json` 一处改，**无需重启**，下次调用即生效；支持 `preset:` 别名与运行时 API 原子覆盖。
+**⚙️ Per-Agent 模型路由** — `agent-models.json` 一处改，**无需重启**即生效；支持 `preset:` 别名与运行时 API 原子覆盖，按角色匹配模型。
 
-**⌨️ Linear 风交互** — Cmd-K 命令栏、Virtuoso 虚拟消息列表、token 级流式输出、Stop 按钮、上滑浮现"新消息"浮钮。
+**⌨️ 工程级前端** — Linear 风交互：Cmd-K 命令栏、Virtuoso 虚拟消息列表、token 级流式输出、Stop 按钮、上滑浮现"新消息"浮钮。
 
-**🦾 Proserpina 评审桥** — 5 个 Python critic（Methodologist / Devil's Advocate / Editor / Domain Expert / Red Team）可对任意 agent 输出加压评审。
-
-**🚀 一键部署** — `atelier deploy` 自动检测环境，幂等补全依赖 + 配置，新机器零配置拉起。
+**🚀 幂等部署** — `atelier deploy` 自动检测环境，幂等补全依赖 + 配置，新机器零配置拉起。
 
 ---
 
@@ -68,7 +82,7 @@ cd Atelier
 atelier start
 ```
 
-打开 **http://127.0.0.1:5173** → 新建房间 → 输入 `@Forge 你好，介绍一下你自己` 派出第一个活。
+打开 **http://127.0.0.1:5173** → 新建工作空间（Room）→ 输入 `@Forge 你好，介绍一下你自己` 下发第一个任务。
 
 三个服务随之拉起：
 
@@ -126,7 +140,7 @@ POSIX 等价：`./scripts/deploy.sh --start` / `--install-opencode` / `--force-a
 | 🗄️ **Archivist** | **唯一**允许写 `[MEMORY]` 的 agent | `@Archivist` |
 | 📒 **Trainer** | 经验固化 / rules / template | `@Trainer` |
 
-推进对话的两种方式：
+驱动任务流转的两种方式：
 
 1. **显式提及** —— `Hey @Forge，把 triggers.ts 改成 better-sqlite3 事务`
 2. **隐式交接** —— Forge 输出 `[RESULT]` 时 Lens 自动被召唤评审；命中 `critical` / `major` 时 Forge 再被拉回返工。
@@ -207,7 +221,7 @@ GET    /api/rooms/:id/events
 GET    /api/agents                   POST   /api/agents
 PATCH  /api/agents/:id/status
 POST   /api/route-to                 # 直接调度 agent
-POST   /api/invite                   # 加 agent 进房间
+POST   /api/invite                   # 加 agent 进工作空间
 POST   /api/self-talk                # 切换 self-talk tick
 ```
 
