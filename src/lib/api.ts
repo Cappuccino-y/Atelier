@@ -132,6 +132,13 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** Authoritative liveness list — runs this server process has actually
+   *  spawned. Used to clear zombie dock rows after a refresh or restart. */
+  listRuns: () =>
+    request<{ runs: Array<{ runId: string; roomId?: string; agentId?: string; startedAt: number }> }>(
+      "/api/runtime/runs"
+    ),
+
   mcpRooms: () => request<{ rooms: Array<{ id: string; name: string }> }>("/mcp/rooms"),
 
   debugLog: (body: { level?: string; tag?: string; message: string; data?: unknown }) =>

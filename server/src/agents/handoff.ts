@@ -176,6 +176,17 @@ export const HandoffPayloadV2_1Schema = z.object({
         // would wrongly force everyone to the same tag. This lets each
         // target declare its own.
         requiredOutputSchema: OutputSchemaEnum.optional(),
+        // Instance label for multi-instance roles (v2.1). Two entries with
+        // the same `name` but DIFFERENT `as` labels dispatch as two
+        // concurrent instances of that role (e.g. Forge-A / Forge-B with
+        // disjoint file domains). Repeating the bare name works too
+        // (["forge","forge"]) but LLMs tend to dedupe identical array
+        // entries — the labeled form is the reliable one. Same name + same
+        // `as` (or both unlabeled) collapses to one target.
+        as: z.preprocess(
+          (v) => (typeof v === "string" ? v.trim().slice(0, 64) : v),
+          z.string().min(1).max(64).optional(),
+        ),
       }).refine((o) => o.id || o.name || o.rawName, { message: "to entry needs id, name or rawName" }),
     ])
   ).min(1),
@@ -249,6 +260,9 @@ export type HandoffDirectiveV2 = {
     /** Per-target output schema. Overrides the shared requiredOutputSchema
      *  for this receiver (parallel fan-out with different artifact types). */
     requiredOutputSchema?: OutputSchema;
+    /** Instance label (multi-instance roles). Same name + different `as`
+     *  = separate concurrent instances (see expandFanOutTargets). */
+    as?: string;
   }>;
   taskSummary: string;
   provenance?: HandoffPayloadV2["provenance"];
@@ -411,6 +425,59 @@ function findBalancedJsonObjects(content: string): JsonMatch[] {
 }
 
 /**
+ * Truncation-repair candidates: LLM output sometimes stops mid-object
+ * (token cap or sloppiness) leaving the handoff JSON UNBALANCED — the
+ * balanced scans above can never match it, and the whole chain dies
+ * silently (observed 2026-09-10: Atlas's phase-2 dispatch was one `}` short
+ * at the very end of the reply). Take the `{"schemaVersion"` anchor through
+ * end-of-text, compute the stack of unclosed openers with a string-aware
+ * scan, and synthesize the missing closers.
+ */
+function truncatedCandidates(content: string): JsonMatch[] {
+  const out: JsonMatch[] = [];
+  let from = 0;
+  for (;;) {
+    const keyIdx = content.indexOf('"schemaVersion"', from);
+    if (keyIdx === -1) break;
+    let brace = keyIdx - 1;
+    while (brace >= 0 && /\s/.test(content[brace])) brace--;
+    if (brace >= 0 && content[brace] === "{") {
+      const tail = content.slice(brace);
+      // string-aware scan computing unclosed openers at EOF
+      const stack: Array<"{" | "["> = [];
+      let inString = false;
+      let terminatedEarly = false;
+      for (let j = 0; j < tail.length; j++) {
+        const ch = tail[j];
+        if (inString) {
+          if (ch === "\\") { j++; continue; }
+          if (ch === '"') {
+            const after = tail.slice(j + 1);
+            const fns = after.match(/\S/);
+            const firstNonWs = fns ? after[fns.index!] : undefined;
+            if (firstNonWs === undefined || /[,\]\}:]/.test(firstNonWs)) inString = false;
+          }
+          continue;
+        }
+        if (ch === '"') { inString = true; continue; }
+        if (ch === "{") stack.push("{");
+        else if (ch === "[") stack.push("[");
+        else if (ch === "}") { if (stack.pop() !== "{") { terminatedEarly = true; break; } }
+        else if (ch === "]") { if (stack.pop() !== "[") { terminatedEarly = true; break; } }
+      }
+      if (!terminatedEarly && (stack.length > 0 || inString)) {
+        let repaired = tail;
+        if (inString) repaired += '"';
+        for (let s = stack.length - 1; s >= 0; s--) repaired += stack[s] === "{" ? "}" : "]";
+        out.push({ text: repaired, start: brace, end: content.length });
+      }
+    }
+    from = keyIdx + 1;
+  }
+  return out;
+}
+
+/**
  * Best-effort repair for a JSON string that fails strict parse. Handles
  * the most common LLM drift patterns:
  *   1. Trailing commas before } or ]
@@ -542,6 +609,7 @@ function locateHandoffJson(content: string): JsonMatch | null {
     ...fencedCandidates(content),
     ...anchoredCandidates(content),
     ...findBalancedJsonObjects(content),
+    ...truncatedCandidates(content),
   ];
   for (const match of candidates) {
     if (seen.has(match.start)) continue;
@@ -656,28 +724,63 @@ export function diagnoseHandoffFailure(content: string, locator: AgentLocator): 
       return "handoff-like JSON without schemaVersion (v1 is retired — please use schemaVersion: \"2.0\")";
     }
   }
+  // Truncated / unbalanced handoff JSON: the balanced scan above can never
+  // match it, but the `{"schemaVersion"` anchor is present. Report what the
+  // auto-closer salvaged (or that it was unrepairable) instead of going
+  // silent — the silent case dead-ends the whole chain invisibly.
+  for (const match of truncatedCandidates(content)) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(match.text);
+    } catch {
+      const repaired = repairJson(match.text);
+      if (!repaired) continue;
+      try { raw = JSON.parse(repaired); } catch { continue; }
+    }
+    if (!raw || typeof raw !== "object") continue;
+    const obj = raw as Record<string, unknown>;
+    if (obj.schemaVersion === "2.0" || obj.schemaVersion === "2.1") {
+      const parsed = HandoffPayloadV2_1Schema.safeParse(obj);
+      if (!parsed.success) {
+        const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "root"}: ${i.message}`).slice(0, 4).join("; ");
+        return `handoff-like JSON found but TRUNCATED/unbalanced (auto-closed brackets) and schema rejected — ${issues || "unknown"}`;
+      }
+      // repaired + schema-valid → parseHandoff would have accepted it; only
+      // reach here if target resolution failed.
+      const d = resolveV2(parsed.data, locator);
+      if (!d) return "handoff (recovered from truncation) schema OK but none of the targets resolved to a known agent";
+      return null;
+    }
+  }
   return null;
 }
 
 function resolveV2(payload: HandoffPayloadV2, locator: AgentLocator): HandoffDirectiveV2 | null {
+  // Dedupe key = agent id + instance label. Same agent with DIFFERENT `as`
+  // labels are distinct concurrent instances (Forge-A / Forge-B) and must
+  // BOTH survive; only identical (id, as) pairs collapse.
   const seen = new Set<string>();
-  const resolved: Array<{ id: string; name: string; rawName: string; taskSummary?: string; requiredOutputSchema?: OutputSchema }> = [];
+  const resolved: Array<{ id: string; name: string; rawName: string; taskSummary?: string; requiredOutputSchema?: OutputSchema; as?: string }> = [];
   for (const entry of payload.to) {
     // Accept both string ("atlas") and object ({id|name|rawName}) forms.
     // Object entries may carry a per-target taskSummary + requiredOutputSchema
-    // (parallel fan-out with different tasks/artifacts per agent).
+    // (parallel fan-out with different tasks/artifacts per agent) and an
+    // optional `as` instance label (multi-instance roles).
     const rawName = typeof entry === "string" ? entry : (entry.id ?? entry.name ?? entry.rawName ?? "");
+    const as = typeof entry === "object" && !Array.isArray(entry) ? entry.as : undefined;
     const agent = locator(rawName);
-    if (agent && !seen.has(agent.id)) {
-      resolved.push({
-        id: agent.id,
-        name: agent.name,
-        rawName,
-        taskSummary: typeof entry === "object" ? entry.taskSummary : undefined,
-        requiredOutputSchema: typeof entry === "object" ? entry.requiredOutputSchema : undefined,
-      });
-      seen.add(agent.id);
-    }
+    if (!agent) continue;
+    const dedupeKey = `${agent.id}#${as ?? ""}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    resolved.push({
+      id: agent.id,
+      name: agent.name,
+      rawName,
+      taskSummary: typeof entry === "object" ? entry.taskSummary : undefined,
+      requiredOutputSchema: typeof entry === "object" ? entry.requiredOutputSchema : undefined,
+      as: typeof entry === "object" ? entry.as : undefined,
+    });
   }
   if (resolved.length === 0) return null;
   const fp = payload.failurePolicy ?? { onInvalidOutput: "retry" as const, onTimeout: "fallback_echo" as const, maxRetries: 1 };

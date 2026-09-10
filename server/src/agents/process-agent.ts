@@ -123,11 +123,19 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
     });
     if (opts.runId) {
       const runId = opts.runId;
-      registerRun(runId, child);
+      // returns the registry's AbortController — aborting it resolves the run
+      // as cancelled:true (user interrupt), never as a generic failure
+      const controller = registerRun(runId, child, { roomId: opts.roomId, agentId: opts.agentName });
       const keys: string[] = [opts.agentName];
       if (opts.roomId) keys.unshift(`${opts.roomId}:${opts.agentName}`);
       registerRunAliases(runId, keys);
       child.once("close", () => unregisterRunAliases(runId, keys));
+      const onAbort = () => {
+        aborted = true;
+        killTree(child);
+      };
+      if (controller.signal.aborted) onAbort();
+      else controller.signal.addEventListener("abort", onAbort, { once: true });
     }
 
     const timer = setTimeout(() => {
@@ -156,14 +164,14 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
       killBackstopTimer.unref?.();
     }, timeoutMs);
 
-    // external abort (Stop button)
-    const onAbort = () => {
+    // external abort (caller-provided signal)
+    const onExternalAbort = () => {
       aborted = true;
       killTree(child);
     };
     if (opts.signal) {
-      if (opts.signal.aborted) onAbort();
-      else opts.signal.addEventListener("abort", onAbort, { once: true });
+      if (opts.signal.aborted) onExternalAbort();
+      else opts.signal.addEventListener("abort", onExternalAbort, { once: true });
     }
 
     let closed = false;
@@ -171,7 +179,7 @@ type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "$
     const settleClose = () => {
       if (killBackstopTimer) clearTimeout(killBackstopTimer);
       closed = true;
-      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      if (opts.signal) opts.signal.removeEventListener("abort", onExternalAbort);
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     };
 
@@ -454,10 +462,27 @@ export function consumeJsonObjects(buf: string): { consumed: number; objects: an
 const activeChildren = new Map<string, ChildProcess>();
 /** roomKey (`roomId:agentId` or bare `agentId`) → runId, for stop-by-room-agent */
 const activeByRoomAgent = new Map<string, string>();
+/** runId → AbortController, so /api/agents/stop can cancel the run cleanly
+ *  (cancelled:true) instead of the kill path resolving as a generic failure. */
+const activeControllers = new Map<string, AbortController>();
+/** runId → run metadata for the /api/runtime/runs liveness endpoint. */
+const activeMeta = new Map<string, { roomId?: string; agentId?: string; startedAt: number }>();
 
-export function registerRun(runId: string, child: ChildProcess): void {
+export function registerRun(
+  runId: string,
+  child: ChildProcess,
+  meta?: { roomId?: string; agentId?: string },
+): AbortController {
   activeChildren.set(runId, child);
-  child.once("close", () => activeChildren.delete(runId));
+  const controller = new AbortController();
+  activeControllers.set(runId, controller);
+  activeMeta.set(runId, { roomId: meta?.roomId, agentId: meta?.agentId, startedAt: Date.now() });
+  child.once("close", () => {
+    activeChildren.delete(runId);
+    activeControllers.delete(runId);
+    activeMeta.delete(runId);
+  });
+  return controller;
 }
 
 /** Register alternate lookup keys (roomId:agentId, agentId) for the same run
@@ -474,6 +499,35 @@ export function unregisterRunAliases(runId: string, keys: string[]): void {
   for (const k of keys) {
     if (activeByRoomAgent.get(k) === runId) activeByRoomAgent.delete(k);
   }
+}
+
+/** Snapshot of currently-live runs for the liveness endpoint. */
+export function listRuns(): Array<{ runId: string; roomId?: string; agentId?: string; startedAt: number }> {
+  const out: Array<{ runId: string; roomId?: string; agentId?: string; startedAt: number }> = [];
+  for (const [runId, meta] of activeMeta) {
+    if (!activeChildren.has(runId)) continue; // close event pending — treat as dead
+    out.push({ runId, roomId: meta.roomId, agentId: meta.agentId, startedAt: meta.startedAt });
+  }
+  return out;
+}
+
+/** Abort a run via its AbortController — the run resolves as cancelled:true
+ *  (a deliberate user interrupt, NOT a failure). Falls back to killTree when
+ *  no controller is registered. */
+export function abortRun(runId: string): boolean {
+  const controller = activeControllers.get(runId);
+  if (controller) {
+    controller.abort();
+    return true;
+  }
+  return killRun(runId);
+}
+
+/** Abort by room/agent key (or any alias) — resolves to a runId first. */
+export function abortRunByKey(key: string): boolean {
+  const runId = activeByRoomAgent.get(key);
+  if (!runId) return false;
+  return abortRun(runId);
 }
 
 export function killRun(runId: string): boolean {

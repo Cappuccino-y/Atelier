@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
-import { killRun, killRunByKey } from "../agents/process-agent.js";
+import { abortRun, abortRunByKey, listRuns } from "../agents/process-agent.js";
 
 export async function routes(app: FastifyInstance) {
   app.get("/api/agents", async () => {
@@ -27,19 +27,25 @@ export async function routes(app: FastifyInstance) {
   app.post<{ Body: { roomId: string; agentId?: string; runId?: string } }>("/api/agents/stop", async (req) => {
     const { roomId, agentId, runId } = req.body ?? ({} as any);
     // Exact runId first, then room/agent alias keys — both are now registered
-    // for every live run, so a Stop without runId actually works.
+    // for every live run, so a Stop without runId actually works. Aborting
+    // (vs killTree) marks the run cancelled:true so the routing layer treats
+    // it as a deliberate user interrupt, not a failure.
     let killed = 0;
     if (runId) {
-      if (killRun(runId)) killed = 1;
+      if (abortRun(runId)) killed = 1;
     } else if (agentId && roomId) {
       const candidates = [`${roomId}:${agentId}`, agentId];
       for (const key of candidates) {
-        if (killRunByKey(key)) killed++;
+        if (abortRunByKey(key)) killed++;
       }
     } else {
       return { ok: false, error: "roomId + agentId (or runId) required" } as any;
     }
     return { ok: true, killed };
+  });
+
+  app.get("/api/agents/runs", async () => {
+    return { runs: listRuns() };
   });
 }
 

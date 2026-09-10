@@ -15,6 +15,7 @@ import { atchDebug } from "@/lib/atch-debug";
 import type {
   Agent, Message, Room, Project, Task, Finding, Event, ServerEvent, ActivityEvent, ActivityKind, MemoryEntry,
 } from "@/types";
+import { type LiveRun, type RunningRun } from "@/components/chat/RunningDock";
 import type { WsStatus } from "@/lib/ws";
 import { Toaster, toast } from "@/components/ui/toast-stub";
 
@@ -48,10 +49,12 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
-  const [streamingAgentMap, setStreamingAgentMap] = useState<Record<string, string>>({});
   const [streamingText, setStreamingText] = useState<Record<string, string>>({});
   const [streamingTool, setStreamingTool] = useState<Record<string, string>>({});
-  const [activeRunId, setActiveRunId] = useState<string | undefined>();
+  // Live runs keyed by runId (fallback `${roomId}:${agentId}`). runId-granular
+  // so parallel same-role instances (to:["forge","forge"]) render as separate
+  // rows in the running dock.
+  const [liveRuns, setLiveRuns] = useState<Record<string, LiveRun>>({});
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
 
   // rAF-batched streaming buffers: WS events arrive faster than 60fps and we
@@ -103,8 +106,33 @@ export default function App() {
 
   const currentRoom = useMemo(() => rooms.find(r => r.id === currentRoomId), [rooms, currentRoomId]);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
-  const currentStreamingAgentId = currentRoomId ? streamingAgentMap[currentRoomId] : undefined;
-  const streamingAgent = currentStreamingAgentId ? agentMap.get(currentStreamingAgentId) ?? null : null;
+
+  // current room's runs — display shape for the RunningDock, with parallel
+  // same-role instances numbered (Forge, Forge ·2, …)
+  const roomRuns = useMemo(() => {
+    if (!currentRoomId) return [];
+    const list = Object.values(liveRuns).filter(r => r.roomId === currentRoomId);
+    const perAgent: Record<string, number> = {};
+    return list
+      .sort((a, b) => a.startedAt - b.startedAt)
+      .map(r => {
+        const agent = agentMap.get(r.agentId);
+        if (!agent) return null;
+        perAgent[r.agentId] = (perAgent[r.agentId] ?? 0) + 1;
+        const sKey = `${currentRoomId}:${r.agentId}`;
+        return {
+          key: r.key,
+          agent,
+          startedAt: r.startedAt,
+          lastEventAt: r.lastEventAt,
+          runId: r.runId,
+          tool: streamingTool[sKey] ?? r.lastTool,
+          textTail: streamingText[sKey]?.slice(-180),
+          instanceLabel: perAgent[r.agentId] > 1 ? `#${perAgent[r.agentId]}` : undefined,
+        } as RunningRun;
+      })
+      .filter((r): r is RunningRun => r !== null);
+  }, [liveRuns, currentRoomId, agentMap, streamingTool, streamingText]);
 
   // stable ref for activity appender (avoid re-binding ws handler)
   const pushActivity = useRef((ev: Omit<ActivityEvent, "id" | "timestamp">) => {
@@ -139,6 +167,43 @@ export default function App() {
     } catch { /* notifications unavailable */ }
   }, []);
 
+  // Reconcile the activity-derived live runs against the server's authoritative
+  // run registry. After a page refresh this ADDS runs the UI missed; after a
+  // server stop/start cycle the registry is empty, which clears zombie rows.
+  const syncServerRuns = useCallback(async () => {
+    try {
+      const { runs } = await api.listRuns();
+      const byRunId = new Map(runs.map(r => [r.runId, r]));
+      setLiveRuns(prev => {
+        const next: Record<string, LiveRun> = {};
+        for (const [k, r] of Object.entries(prev)) {
+          const server = r.runId ? byRunId.get(r.runId) : undefined;
+          const stub = !r.runId
+            ? runs.find(s => s.roomId === r.roomId && s.agentId === r.agentId)
+            : undefined;
+          const match = server ?? stub;
+          if (match) next[k] = r; // confirmed alive
+        }
+        for (const s of runs) {
+          const known = Object.values(next).some(
+            r => (r.runId && r.runId === s.runId) || (r.roomId === s.roomId && r.agentId === s.agentId),
+          );
+          if (!known) {
+            next[s.runId] = {
+              key: s.runId,
+              roomId: s.roomId ?? "",
+              agentId: s.agentId ?? "",
+              runId: s.runId,
+              startedAt: s.startedAt,
+              lastEventAt: s.startedAt,
+            };
+          }
+        }
+        return next;
+      });
+    } catch { /* endpoint unavailable — keep activity-derived state */ }
+  }, []);
+
   // Initial load
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +222,7 @@ export default function App() {
       } finally {
         if (!cancelled) setLoading(false);
       }
+      syncServerRuns();
     })();
     return () => { cancelled = true; };
   }, []);
@@ -171,6 +237,7 @@ export default function App() {
   // Re-fetch room data on WS reconnect (missed events during disconnect gap)
   useEffect(() => {
     const unsub = ws.onReconnect(() => {
+      syncServerRuns();
       if (!currentRoomId) return;
       Promise.all([
         api.listMessages(currentRoomId),
@@ -183,7 +250,7 @@ export default function App() {
       }).catch(() => {});
     });
     return unsub;
-  }, [currentRoomId]);
+  }, [currentRoomId, syncServerRuns]);
 
   // Desktop notifications — request permission lazily on first interaction;
   // notify when an agent finishes/fails in the background (tab hidden).
@@ -244,8 +311,49 @@ export default function App() {
             // server data is newest-first, reverse to match pushActivity (newest last for chrono sort)
             return [...others, ...acts.reverse()];
           });
+          // rebuild live runs from persisted activities so the running dock
+          // survives a page refresh. runId-granular when the server recorded
+          // it, agentId-keyed otherwise (live WS events upgrade it later).
+          const chrono = [...acts].reverse();
+          setLiveRuns(prev => {
+            const next: Record<string, LiveRun> = {};
+            for (const [k, r] of Object.entries(prev)) {
+              if (r.roomId !== currentRoomId) next[k] = r;
+            }
+            for (const ev of chrono) {
+              if (!ev.agentId) continue;
+              const runId = typeof ev.meta?.runId === "string" ? ev.meta.runId : undefined;
+              const key = runId ?? `${currentRoomId}:${ev.agentId}`;
+              const sameRoomAgent = (r: LiveRun) =>
+                r.roomId === currentRoomId && r.agentId === ev.agentId;
+              if (ev.kind === "agent.thinking" && !ev.pending) {
+                const existing = next[key];
+                next[key] = existing
+                  ? { ...existing, lastEventAt: ev.timestamp }
+                  : { key, roomId: currentRoomId, agentId: ev.agentId, runId, startedAt: ev.timestamp, lastEventAt: ev.timestamp };
+              } else if (ev.kind === "agent.tool_call") {
+                const tool = typeof ev.meta?.tool === "string" ? ev.meta.tool : (ev.message || undefined);
+                const existing = next[key];
+                next[key] = existing
+                  ? { ...existing, lastEventAt: ev.timestamp, lastTool: tool ?? existing.lastTool }
+                  : { key, roomId: currentRoomId, agentId: ev.agentId, runId, startedAt: ev.timestamp, lastEventAt: ev.timestamp, lastTool: tool };
+              } else if (ev.kind === "agent.completed" || ev.kind === "agent.error") {
+                for (const k of Object.keys(next)) {
+                  const r = next[k];
+                  const match = runId
+                    ? r.runId === runId
+                    : sameRoomAgent(r);
+                  if (match) delete next[k];
+                }
+              }
+            }
+            return next;
+          });
         }
       } catch { /* no persisted activities */ }
+      // activities may have re-seeded runs — reconcile against the server's
+      // authoritative registry AFTER the rebuild so zombies can't come back
+      void syncServerRuns();
       if (!cancelled) setRoomLoading(false);
     })();
     return () => { cancelled = true; };
@@ -335,8 +443,22 @@ export default function App() {
         case "agent.thinking": {
           const p = payload as { roomId: string; agentId: string; message?: string; pending?: boolean; runId?: string };
           if (p.agentId && !p.pending) {
-            setStreamingAgentMap(prev => ({ ...prev, [p.roomId]: p.agentId }));
-            if (p.runId) setActiveRunId(p.runId);
+            const now = Date.now();
+            const key = p.runId ?? `${p.roomId}:${p.agentId}`;
+            setLiveRuns(prev => {
+              const next = { ...prev };
+              // a runId-keyed run supersedes any agentId-keyed stub (REST rebuild)
+              if (p.runId) {
+                for (const k of Object.keys(next)) {
+                  if (next[k].roomId === p.roomId && next[k].agentId === p.agentId && !next[k].runId) delete next[k];
+                }
+              }
+              const existing = next[key];
+              next[key] = existing
+                ? { ...existing, lastEventAt: now }
+                : { key, roomId: p.roomId, agentId: p.agentId, runId: p.runId, startedAt: now, lastEventAt: now };
+              return next;
+            });
           }
           pushActivity({
             roomId: p.roomId,
@@ -353,6 +475,21 @@ export default function App() {
             streamToolRef.current[`${p.roomId}:${p.agentId}`] = p.tool;
             scheduleFlush();
           }
+          // heartbeats bump every open run of this agent (runId is not on
+          // tool_call payloads, so attribute to all of the agent's runs)
+          const now = Date.now();
+          setLiveRuns(prev => {
+            let changed = false;
+            const next = { ...prev };
+            for (const k of Object.keys(next)) {
+              const r = next[k];
+              if (r.roomId === p.roomId && r.agentId === p.agentId) {
+                next[k] = { ...r, lastEventAt: now, lastTool: p.tool };
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
           pushActivity({
             roomId: p.roomId,
             kind: "agent.tool_call",
@@ -369,6 +506,19 @@ export default function App() {
             streamBufferRef.current[key] = (streamBufferRef.current[key] ?? "") + p.delta;
             scheduleFlush();
           }
+          const now = Date.now();
+          setLiveRuns(prev => {
+            let changed = false;
+            const next = { ...prev };
+            for (const k of Object.keys(next)) {
+              const r = next[k];
+              if (r.roomId === p.roomId && r.agentId === p.agentId) {
+                next[k] = { ...r, lastEventAt: now };
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
           break;
         }
         case "agent.step_done": {
@@ -393,12 +543,15 @@ export default function App() {
         }
         case "agent.completed": {
           const p = payload as { roomId: string; agentId: string; elapsedMs?: number; runId?: string };
-          setStreamingAgentMap(prev => {
+          setLiveRuns(prev => {
             const next = { ...prev };
-            if (next[p.roomId] === p.agentId) delete next[p.roomId];
+            for (const k of Object.keys(next)) {
+              const r = next[k];
+              const match = p.runId ? r.runId === p.runId : (r.roomId === p.roomId && r.agentId === p.agentId);
+              if (match) delete next[k];
+            }
             return next;
           });
-          setActiveRunId(curr => (curr && p.runId === curr) ? undefined : curr);
           // clear streaming buffers immediately (not via rAF) so no stale delta
           // leaks into a future run by the same agent.
           const streamKey = `${p.roomId}:${p.agentId}`;
@@ -426,12 +579,15 @@ export default function App() {
         }
         case "agent.error": {
           const p = payload as { roomId: string; agentId: string; error: string };
-          setStreamingAgentMap(prev => {
+          setLiveRuns(prev => {
             const next = { ...prev };
-            if (next[p.roomId] === p.agentId) delete next[p.roomId];
+            for (const k of Object.keys(next)) {
+              const r = next[k];
+              const match = r.roomId === p.roomId && r.agentId === p.agentId;
+              if (match) delete next[k];
+            }
             return next;
           });
-          setActiveRunId(undefined);
           const streamKey = `${p.roomId}:${p.agentId}`;
           delete streamBufferRef.current[streamKey];
           delete streamToolRef.current[streamKey];
@@ -683,33 +839,31 @@ export default function App() {
     api.selfTalkTick(currentRoomId).catch(() => {});
   }, [currentRoomId]);
 
-  const handleStopStreaming = useCallback(async () => {
+  const handleStopAgent = useCallback(async (agentId: string, runId?: string) => {
     if (!currentRoomId) return;
-    const agentId = streamingAgentMap[currentRoomId];
-    if (!agentId) return;
+    // prefer the row's own runId; otherwise the server resolves by agent alias
     try {
       await api.stopAgent({
         roomId: currentRoomId,
         agentId,
-        runId: activeRunId,
+        runId: runId ?? undefined,
       });
-      setStreamingAgentMap(prev => {
-        const next = { ...prev };
-        delete next[currentRoomId];
-        return next;
-      });
-      setActiveRunId(undefined);
       toast.info("Stopped current generation");
     } catch (err) {
       toast.error("Failed to stop", { detail: String(err) });
     }
-  }, [currentRoomId, streamingAgentMap, activeRunId]);
+  }, [currentRoomId]);
 
   const handleStopAll = useCallback(async () => {
     try {
       const result = await api.stopAgents(currentRoomId ? { roomId: currentRoomId } : {});
-      setStreamingAgentMap({});
-      setActivities([]);
+      setLiveRuns(prev => {
+        const next = { ...prev };
+        for (const k of Object.keys(next)) {
+          if (!currentRoomId || next[k].roomId === currentRoomId) delete next[k];
+        }
+        return next;
+      });
       if (result.cancelled > 0) {
         toast.info(`Stopped ${result.cancelled} running agent${result.cancelled === 1 ? "" : "s"}`);
       } else {
@@ -777,7 +931,7 @@ export default function App() {
         tasks={tasks}
         events={events}
         activities={activities}
-        streamingAgent={streamingAgent}
+        runs={roomRuns}
         wsStatus={wsStatus}
         showRightPanel={rightPanelOpen}
         onSelectRoom={setCurrentRoomId}
@@ -795,7 +949,7 @@ export default function App() {
         onUpdateTask={handleUpdateTask}
         onDeleteTask={handleDeleteTask}
         onSaveNotes={handleSaveNotes}
-        onStopStreaming={handleStopStreaming}
+        onStopAgent={handleStopAgent}
         onStopAll={handleStopAll}
         onToggleRightPanel={handleToggleRightPanel}
         onCreateProject={handleCreateProject}

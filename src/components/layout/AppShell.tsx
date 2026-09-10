@@ -6,6 +6,7 @@ import { CommandBar } from "./SearchPalette";
 import { MessageList } from "@/components/chat/MessageList";
 import { Composer } from "@/components/chat/Composer";
 import { RoomHeader } from "@/components/chat/RoomHeader";
+import { RunningDock, type RunningRun } from "@/components/chat/RunningDock";
 import type {
   Agent, Message, Room, Project, Task, Event, ActivityEvent, MemoryEntry,
 } from "@/types";
@@ -24,7 +25,7 @@ type Props = {
   tasks: Task[];
   events: Event[];
   activities: ActivityEvent[];
-  streamingAgent?: Agent | null;
+  runs: RunningRun[];
   wsStatus: WsStatus;
   showRightPanel: boolean;
   onSelectRoom: (id: string) => void;
@@ -42,7 +43,7 @@ type Props = {
   onUpdateTask: (id: string, patch: Partial<Task>) => void;
   onDeleteTask: (id: string) => void;
   onSaveNotes: (notes: string) => void;
-  onStopStreaming: () => void;
+  onStopAgent: (agentId: string) => void;
   onStopAll: () => void;
   onToggleRightPanel: () => void;
   onCreateProject: (name: string) => void;
@@ -81,28 +82,14 @@ export function AppShell(props: Props) {
 
   const allMessages = props.messages;
 
-  const activeAgentIds = useMemo(() => {
-    if (!props.currentRoom) return [];
-    const ids = new Set<string>();
-    // Scope to the current room — App-level activity state receives events
-    // from every room and would otherwise leak across rooms.
-    // Walk events chronologically so a normal thinking → completed/errored
-    // sequence leaves the agent in the correct final state. Descending order
-    // would let an older thinking event re-add an agent after a newer
-    // completion.
-    const sorted = props.activities
-      .filter(a => a.roomId === props.currentRoom!.id)
-      .sort((a, b) => a.timestamp - b.timestamp);
-    for (const ev of sorted) {
-      if (!ev.agentId) continue;
-      if (ev.kind === "agent.thinking") {
-        ids.add(ev.agentId);
-      } else if (ev.kind === "agent.completed" || ev.kind === "agent.error") {
-        ids.delete(ev.agentId);
-      }
-    }
-    return Array.from(ids);
-  }, [props.activities, props.currentRoom]);
+  // runs are derived in App (WS-driven, runId-granular) and survive refresh
+  // via the REST activities rebuild
+  const runningRuns = props.runs;
+
+  const activeAgentIds = useMemo(
+    () => Array.from(new Set(runningRuns.map(r => r.agent.id))),
+    [runningRuns],
+  );
 
   const unreadRooms = props.rooms.filter(r => r.unread > 0).length;
 
@@ -158,14 +145,14 @@ export function AppShell(props: Props) {
                 roomId={props.currentRoom?.id}
                 messages={allMessages}
                 agents={props.agents}
-                streamingAgent={props.streamingAgent}
-                streamingText={props.streamingText}
-                streamingTool={props.streamingTool}
-                onStopStreaming={props.onStopStreaming}
                 onReply={handleReply}
                 onShowChain={props.onShowChain}
               />
-              {props.roomLoading && (
+              <RunningDock
+                runs={runningRuns}
+                onStopAgent={props.onStopAgent}
+                onStopAll={props.onStopAll}
+              />              {props.roomLoading && (
                 <div className="px-4 py-2 text-[12px] text-zinc-400 border-t border-zinc-200/80 bg-white">
                   Loading room data…
                 </div>

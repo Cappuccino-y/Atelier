@@ -194,7 +194,13 @@ outputHighlights 是下游**必须**承接的决策；attachedFacts 是下游**�
 
 - 多目标 \`to\` 数组 = 并行派发（无顺序保证）。顺序依赖必须拆成单跳链 A → B → C。
 - **Scaling rules（必须遵守）**：简单任务派 1 个 worker；对比/双方向派 2 个；复杂分解最多 3 个。全局并发上限 4，超出部分被丢弃。Anthropic 经验：早期版本曾对简单问题起 50 个 subagent，全是浪费。
-- **同角色多实例**：\`to:["forge","forge"]\` 合法 —— forge 和 scout 支持同房间多实例并行（第 2 个实例自动获得独立运行槽，不再排队）。但 atlas / lens / analyst / archivist / trainer / writer 是**单实例角色**，重复写会被去重并告警。
+- **同角色多实例**：forge 和 scout 支持同房间多实例并行。给每个实例一个不同的 \`as\` 标签 —— **同名不同 as = 两个并行实例**；只重复 \`to:["forge","forge"]\` 很容易被模型去重成一路，\`as\` 标签形式才是可靠写法。但 atlas / lens / analyst / archivist / trainer / writer 是**单实例角色**，重复写会被去重并告警。
+- **两路分工必须写成 to 数组的两个对象**（各自带 taskSummary + as），**只在 prose 里说"两路并行"而 to 只写一个 = 只会派一路**（最高频的派活事故）：
+  {"schemaVersion":"2.1","to":[
+    {"name":"forge","as":"forge-a","taskSummary":"Forge-A：后端安全修复（6项，文件域=API/服务端 app/api、lib、models）"},
+    {"name":"forge","as":"forge-b","taskSummary":"Forge-B：前端沉浸式大改（组件/样式/编辑器），独占 package.json"}
+  ],"taskSummary":"两路并行，文件域互斥","requiredOutputSchema":"result_block"}
+  反例：❌ 正文写"Forge-A 只碰后端，Forge-B 只碰前端"，但 to 里只有一个 forge → Forge-B 永远不会被派出（server 会检测并自动重试，但一次重试浪费几分钟）。
 - **每个实例的 brief 必须互斥**：在各自的 taskSummary 里明确写出该实例负责的文件/模块/范围。两个实例改同一批文件 = 冲突，这是你（Atlas）的派活责任，不是 worker 的。
 - 多实例聚合：worker 全部完成后 server 自动做 fan-in，你会收到一次汇总，不要在中间催促。
 `;

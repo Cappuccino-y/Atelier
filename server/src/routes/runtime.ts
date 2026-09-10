@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, resolveAgentModel, reloadAgentModelsConfig, type AgentModelsConfig } from "../config.js";
 import { walkProvenanceChain } from "../agents/retry.js";
+import { listRuns, abortRun } from "../agents/process-agent.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -37,6 +38,27 @@ export async function routes(app: FastifyInstance) {
 
   app.post("/api/runtime/clear", async () => {
     return { ok: true };
+  });
+
+  // Liveness: the authoritative list of runs this server process actually has
+  // spawned. The frontend reconciles its activity-derived running dock against
+  // this after a refresh or server restart (a stop/start cycle leaves no live
+  // runs, so stale "running" rows disappear).
+  app.get("/api/runtime/runs", async () => {
+    return { runs: listRuns() };
+  });
+
+  // Stop all runs, optionally scoped to one room. Aborts (cancelled:true) —
+  // never the failure branch.
+  app.post<{ Body: { roomId?: string } }>("/api/runtime/stop", async (req) => {
+    const roomId = req.body?.roomId;
+    const runs = listRuns().filter(r => !roomId || r.roomId === roomId);
+    let cancelled = 0;
+    for (const run of runs) {
+      const ok = abortRun(run.runId);
+      if (ok) cancelled++;
+    }
+    return { ok: true, cancelled, roomId: roomId ?? null };
   });
 
   app.get("/api/runtime/debug-env", async () => {

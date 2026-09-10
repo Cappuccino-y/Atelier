@@ -197,6 +197,34 @@
     animation: shimmer 2s ease-in-out infinite;
   }
 
+  /* light sweep on live "last action" text in the running dock */
+  @keyframes shimmer-text {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .shimmer-text {
+    background: linear-gradient(
+      90deg,
+      oklch(0.55 0.02 260) 40%,
+      oklch(0.75 0.02 260) 50%,
+      oklch(0.55 0.02 260) 60%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer-text 2.4s linear infinite;
+  }
+
+  /* scanning progress line — sweeps across the running-dock top edge */
+  @keyframes scan-x {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(520%); }
+  }
+  .animate-scan-x {
+    animation: scan-x 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
   /* subtle slide-in for panels */
   @keyframes slide-down-fade {
     from {
