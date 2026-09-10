@@ -495,6 +495,27 @@ function repairJson(raw: string): string | null {
 }
 
 /**
+ * Salvage a near-miss handoff object: models sometimes emit per-target
+ * taskSummary entries but forget the required TOP-LEVEL taskSummary
+ * (observed in production: Atlas fan-out to [forge, lens] with per-target
+ * briefs, no top-level summary → whole chain silently dead-ended). The
+ * top-level field drives logs/trailers/UI display only, so deriving it
+ * from the per-target briefs preserves semantics instead of killing the
+ * chain on a technicality. Mutates obj in place; no-op when the field is
+ * already present or nothing can be derived.
+ */
+function salvageTopLevelTaskSummary(obj: Record<string, unknown>): void {
+  const cur = obj.taskSummary;
+  if (typeof cur === "string" && cur.trim().length > 0) return;
+  if (!Array.isArray(obj.to) || obj.to.length === 0) return;
+  const parts = obj.to
+    .map((t) => (t && typeof t === "object" && typeof (t as Record<string, unknown>).taskSummary === "string" ? ((t as Record<string, unknown>).taskSummary as string).trim() : ""))
+    .filter(Boolean);
+  if (parts.length === 0) return;
+  obj.taskSummary = parts.join(" / ");
+}
+
+/**
  * Find the raw JSON text of the handoff object in the reply, or null.
  * Scans candidates in priority order and returns the first one that parses
  * to a recognized handoff shape (v2.1/v2.0). Used by both parseHandoff
@@ -537,6 +558,7 @@ function locateHandoffJson(content: string): JsonMatch | null {
     }
     if (!raw || typeof raw !== "object") continue;
     const obj = raw as Record<string, unknown>;
+    salvageTopLevelTaskSummary(obj);
     if (obj.schemaVersion === "2.0" || obj.schemaVersion === "2.1") {
       if (HandoffPayloadV2_1Schema.safeParse(obj).success) return { ...match, text: reparsed };
     }
@@ -581,6 +603,7 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
   if (!raw || typeof raw !== "object") return null;
 
   const obj = raw as Record<string, unknown>;
+  salvageTopLevelTaskSummary(obj);
 
   // Branch on schemaVersion marker. v2.0 and v2.1 share the same parser
   // — the only difference is optional `intent` / `attachmentRefs` fields.
@@ -811,9 +834,34 @@ export function validateOutputAgainstSchemaDetailed(content: string, required?: 
 /**
  * Extract all tags from a reply. Extended in v2 to recognize the new
  * agent-specific tags: [RESEARCH], [ANALYSIS], [DOCUMENT], [VISUAL],
- * [MEMORY].
+ * [MEMORY]. RULES covers Trainer's rule blocks.
+ *
+ * Single source of truth for the tag vocabulary — ALL_TAG_RE, the
+ * role-context subscription filter (runtime.ts) and extractFinalResult
+ * all derive from this list, so adding a tag here propagates everywhere.
  */
-export const ALL_TAG_RE = /\[(DECISION|TODO|STATUS|RESULT|REVIEW|QUESTION|BLOCKER|RESEARCH|ANALYSIS|DOCUMENT|VISUAL|MEMORY)(?::DEPRECATE)?(?::\w+)?\]/g;
+export const TAG_VOCABULARY = [
+  "DECISION",
+  "TODO",
+  "STATUS",
+  "RESULT",
+  "REVIEW",
+  "QUESTION",
+  "BLOCKER",
+  "RESEARCH",
+  "ANALYSIS",
+  "DOCUMENT",
+  "VISUAL",
+  "MEMORY",
+  "RULES",
+] as const;
+
+export type KnownTag = (typeof TAG_VOCABULARY)[number];
+
+export const ALL_TAG_RE = new RegExp(
+  `\\[(${TAG_VOCABULARY.join("|")})(?::DEPRECATE)?(?::\\w+)?\\]`,
+  "g",
+);
 
 export function extractAllTags(content: string): string[] {
   const tags = new Set<string>();

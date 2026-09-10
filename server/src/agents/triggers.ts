@@ -213,7 +213,7 @@ type FanOutGroup = {
 const fanOutGroups = new Map<string, FanOutGroup>();
 const FAN_OUT_TTL_MS = 10 * 60 * 1000; // 10 min safety net against leaks
 
-function registerFanOutGroup(traceId: string, roomId: string, originator: string, targets: string[]) {
+export function registerFanOutGroup(traceId: string, roomId: string, originator: string, targets: string[]) {
   if (targets.length < 2) return;
   const existing = fanOutGroups.get(traceId);
   if (existing) return;
@@ -243,7 +243,7 @@ function registerFanOutGroup(traceId: string, roomId: string, originator: string
  *     done).
  *   - { status: "none" } — no fan-out group applies; route normally.
  */
-function fanOutOnWorkerDone(opts: {
+export function fanOutOnWorkerDone(opts: {
   traceId: string;
   roomId: string;
   worker: string;
@@ -284,18 +284,75 @@ function fanOutOnWorkerDone(opts: {
   };
 }
 
-function queueKey(roomId: string, agentId: string): string {
-  return `${roomId}:${agentId}`;
+/**
+ * Worker roles allowed to run N concurrent instances of themselves in the
+ * same room (LangGraph Send semantics: one node type, N parallel state
+ * slices). Read-heavy, independent-subtask workers only. Orchestrator /
+ * reviewer / analyst / memory roles MUST stay single-instance — a second
+ * writer breaks routing authority (atlas), review consistency (lens),
+ * judgment ownership (analyst) and memory ownership (archivist/trainer:
+  * two writers to the same store lose updates).
+ */
+const MULTI_INSTANCE_ROLES = new Set(["forge", "scout"]);
+
+/** Instance-aware identity: bare id for the first occurrence, `id#n` for
+ *  the n-th concurrent instance. Room messages stay under the BARE author
+ *  id — instances differ only in queue slot and barrier accounting. */
+export function workerKeyOf(agentId: string, instance?: number): string {
+  return instance ? `${agentId}#${instance}` : agentId;
 }
 
-function drainQueue(roomId: string, agentId: string) {
-  const key = queueKey(roomId, agentId);
+type DispatchTarget = { id: string; name: string; instance?: number; toIndex: number };
+
+/**
+ * Expand a multi-target handoff `to` into dispatch targets. 2nd+ occurrences
+ * of a multi-instance role become real concurrent instances (`instance: n`);
+ * repeats of single-instance roles are DENIED (caller warns). `toIndex`
+ * preserves the original entry position so per-target taskSummary/required-
+ * OutputSchema resolve by index — find-by-id would hand both forge instances
+ * the first forge's brief.
+ */
+export function expandFanOutTargets(to: Array<{ id: string; name: string }>): {
+  expanded: Array<{ id: string; name: string; instance?: number; toIndex: number }>;
+  denied: Array<{ id: string }>;
+} {
+  const expanded: Array<{ id: string; name: string; instance?: number; toIndex: number }> = [];
+  const denied: Array<{ id: string }> = [];
+  const seen = new Map<string, number>();
+  to.forEach((t, toIndex) => {
+    const lower = t.id.toLowerCase();
+    if (MULTI_INSTANCE_ROLES.has(lower)) {
+      const n = (seen.get(lower) ?? 0) + 1;
+      seen.set(lower, n);
+      expanded.push(n === 1
+        ? { id: t.id, name: t.name, toIndex }
+        : { id: t.id, name: t.name, instance: n, toIndex });
+    } else if (!expanded.some((e) => e.id.toLowerCase() === lower)) {
+      expanded.push({ id: t.id, name: t.name, toIndex });
+    } else {
+      denied.push({ id: t.id });
+    }
+  });
+  return { expanded, denied };
+}
+
+function queueKey(roomId: string, agentId: string, instance?: number): string {
+  return `${roomId}:${workerKeyOf(agentId, instance)}`;
+}
+
+function drainQueue(roomId: string, agentId: string, instance?: number) {
+  const key = queueKey(roomId, agentId, instance);
   const q = agentQueues.get(key);
   if (!q || q.length === 0) {
     runningAgents.delete(key);
-    // Agent may still be running in ANOTHER room — only mark idle when no
-    // (room, agent) slot is active anywhere.
-    const stillBusy = [...runningAgents.keys()].some((k) => k !== key && k.endsWith(`:${agentId}`));
+    // Agent may still be running in ANOTHER room OR as another instance —
+    // only mark idle when no (room, agent[instance]) slot is active anywhere.
+    const base = `${roomId}:${agentId}`;
+    const stillBusy = [...runningAgents.keys()].some((k) => {
+      if (k === key) return false;
+      const kBase = k.split("#")[0];
+      return kBase === base || kBase.endsWith(`:${agentId}`);
+    });
     if (!stillBusy) setAgentStatus(agentId, "idle");
     return;
   }
@@ -423,17 +480,45 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
       note: "multi-target handoff — dispatched in parallel (no ordering)",
       timestamp: Date.now(),
     });
-    // Fan-in barrier: remember this fan-out so worker handoffs back to the
-    // originator are coalesced into a single wrap-up (see fanOutOnWorkerDone).
-    registerFanOutGroup(params.handoff.traceId, params.roomId, params.authorId, params.handoff.to.map((t) => t.id));
   }
-  const filtered = targets
+
+  // Multi-instance expansion (LangGraph Send semantics): a multi-target
+  // handoff MAY repeat a worker role, e.g. to:["forge","forge","lens"].
+  // See expandFanOutTargets for the contract.
+  const expansion: { expanded: DispatchTarget[]; denied: Array<{ id: string }> } =
+    (params.handoff && params.handoff.to.length > 1)
+      ? expandFanOutTargets(params.handoff.to)
+      : { expanded: targets.map((t, toIndex) => ({ id: t.id, name: t.name, toIndex })), denied: [] };
+  const expanded = expansion.expanded;
+  for (const d of expansion.denied) {
+    sendAll("system.warning", {
+      roomId: params.roomId,
+      reason: "multi-instance-denied",
+      agentId: d.id,
+      note: `${d.id} is single-instance (orchestrator/reviewer/memory roles keep one writer)`,
+    });
+  }
+
+  // Fan-in barrier: remember this fan-out so worker handoffs back to the
+  // originator are coalesced into a single wrap-up (see fanOutOnWorkerDone).
+  // Barrier accounting uses INSTANCE-AWARE worker keys — two forge
+  // instances are two barrier participants, not one.
+  if (params.handoff && params.handoff.to.length > 1) {
+    registerFanOutGroup(
+      params.handoff.traceId,
+      params.roomId,
+      params.authorId,
+      expanded.map((m) => workerKeyOf(m.id, m.instance)),
+    );
+  }
+
+  const filtered = expanded
     .slice(0, MAX_PARALLEL_AGENTS);
-  if (filtered.length < targets.length) {
+  if (filtered.length < expanded.length) {
     sendAll("system.warning", {
       roomId: params.roomId,
       reason: "concurrency-cap",
-      requested: targets.length,
+      requested: expanded.length,
       invoked: filtered.length,
     });
   }
@@ -445,9 +530,9 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   // ITS handoff.requiredOutputSchema. Sharing the top-level schema across
   // different-artifact workers (Forge: result_block / Lens: review_block /
   // Scout: research_brief) wrongly fails everyone except the first.
-  const perTargetDirective = (m: { id: string }): HandoffDirectiveV2 | undefined => {
+  const perTargetDirective = (m: DispatchTarget): HandoffDirectiveV2 | undefined => {
     if (!params.handoff) return undefined;
-    const target = params.handoff.to.find((t) => t.id === m.id);
+    const target = m.toIndex >= 0 ? params.handoff.to[m.toIndex] : undefined;
     if (!target) return params.handoff;
     if (!target.taskSummary && !target.requiredOutputSchema) return params.handoff;
     return {
@@ -456,7 +541,7 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
       requiredOutputSchema: target.requiredOutputSchema ?? params.handoff.requiredOutputSchema,
     };
   };
-  const promptFor = (m: { id: string }): string => {
+  const promptFor = (m: DispatchTarget): string => {
     if (!params.handoff) return params.content;
     const directive = perTargetDirective(m);
     if (!directive) return params.content;
@@ -469,6 +554,7 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
       invokeAgentAsync({
         roomId: params.roomId,
         agentId: m.id,
+        instance: m.instance,
         prompt: promptFor(m),
         parentMessageId: params.parentMessageId,
         source: params.source,
@@ -505,13 +591,18 @@ function chainDepth(parentMessageId: string | undefined): number {
 async function invokeAgentAsync(opts: {
   roomId: string;
   agentId: string;
+  /** Concurrent-instance number (2nd+ occurrence of a multi-instance role
+   *  in a parallel fan-out). Own queue slot; messages still publish under
+   *  the bare agentId. */
+  instance?: number;
   prompt: string;
   parentMessageId?: string;
   source?: "user" | "agent" | "self-talk";
   signal?: AbortSignal;
   handoff?: HandoffDirectiveV2;
 }): Promise<void> {
-  const key = queueKey(opts.roomId, opts.agentId);
+  const key = queueKey(opts.roomId, opts.agentId, opts.instance);
+  const workerKey = workerKeyOf(opts.agentId, opts.instance);
   const runId = nanoid();
 
   const task = async () => {
@@ -623,20 +714,25 @@ async function invokeAgentAsync(opts: {
         mentionedAgents: mentionedAgents.map((m) => m.id),
         contentLen: result.content.length,
       });
-      if (!emittedHandoff && !runFailed && mentionedAgents.length > 0) {
+      // A handoff-shaped JSON that FAILED schema/target validation must
+      // never dead-end the chain silently (observed in production: Atlas
+      // omitted the top-level taskSummary → parseHandoff null → directives
+      // [] → nothing runs and nobody knows why). Diagnose once here; the
+      // failure cascade below turns it into retry / echo / escalate.
+      const handoffRejected = !runFailed && !emittedHandoff
+        ? diagnoseHandoffFailure(result.content, agentLocator)
+        : null;
+      if (!emittedHandoff && !runFailed && mentionedAgents.length > 0 && handoffRejected) {
         // The agent clearly TRIED to route (prose @mentions) but no valid
         // handoff JSON was found — surface why instead of dying silently.
-        const diag = diagnoseHandoffFailure(result.content, agentLocator);
-        if (diag) {
-          sendAll("system.warning", {
-            roomId: opts.roomId,
-            reason: "handoff-parse-failed",
-            agentId: opts.agentId,
-            detail: diag,
-            mentioned: mentionedAgents.map((m) => m.id),
-          });
-          debugLog("handoff-parse-failed", opts.roomId, opts.agentId, diag, { mentioned: mentionedAgents.map((m) => m.id) });
-        }
+        sendAll("system.warning", {
+          roomId: opts.roomId,
+          reason: "handoff-parse-failed",
+          agentId: opts.agentId,
+          detail: handoffRejected,
+          mentioned: mentionedAgents.map((m) => m.id),
+        });
+        debugLog("handoff-parse-failed", opts.roomId, opts.agentId, handoffRejected, { mentioned: mentionedAgents.map((m) => m.id) });
       }
 
       // Output-schema validation. The INVOKER's requiredOutputSchema — the
@@ -759,15 +855,22 @@ async function invokeAgentAsync(opts: {
       // block for. That falsely flagged the orchestrator's reply as
       // schema-mismatch (resume room: Scout → Atlas with research_brief →
       // Atlas summary rejected → retry → exhausted → silent dead-end).
-      } else if (!cancelled && requiredSchema && !emittedHandoff && !isOrchestratorAgent(opts.agentId) && !validateOutputAgainstSchema(result.content, requiredSchema)) {
+      } else if (!cancelled && !runFailed && !emittedHandoff && (handoffRejected !== null || (requiredSchema && !isOrchestratorAgent(opts.agentId) && !validateOutputAgainstSchema(result.content, requiredSchema)))) {
         validationFailed = true;
-        const vResult = validateOutputAgainstSchemaDetailed(result.content, requiredSchema);
-        sendAll("system.warning", {
+        const vResult = handoffRejected !== null ? null : validateOutputAgainstSchemaDetailed(result.content, requiredSchema);
+        const failureDetail = handoffRejected ?? vResult?.reason ?? `缺少 requiredOutputSchema="${requiredSchema}" 要求的 [TAG] 块`;
+        sendAll("system.warning", handoffRejected !== null ? {
+          roomId: opts.roomId,
+          reason: "handoff-schema-rejected",
+          agentId: opts.agentId,
+          detail: handoffRejected,
+          traceId: opts.handoff?.traceId,
+        } : {
           roomId: opts.roomId,
           reason: "output-schema-mismatch",
           agentId: opts.agentId,
           expected: requiredSchema,
-          detail: vResult.reason ?? undefined,
+          detail: vResult?.reason ?? undefined,
           traceId: opts.handoff?.traceId,
         });
         if (failurePolicy.onInvalidOutput === "fallback_echo" && opts.agentId !== "echo") {
@@ -778,7 +881,7 @@ async function invokeAgentAsync(opts: {
             from: opts.agentId,
             parentTraceId: opts.handoff?.traceId ?? "unknown",
             parentContent: result.content,
-            expectedSchema: requiredSchema,
+            expectedSchema: requiredSchema ?? "answer_text",
             originalTaskSummary: opts.handoff?.taskSummary,
           });
         } else if (failurePolicy.onInvalidOutput === "retry" && failurePolicy.maxRetries > 0) {
@@ -795,7 +898,7 @@ async function invokeAgentAsync(opts: {
             // Format errors are transient — budget only by maxRetries, not
             // wall-clock (the run itself can legitimately take minutes).
             budgetMs: Infinity,
-            reason: `schema-mismatch on "${requiredSchema}"`,
+            reason: handoffRejected !== null ? `handoff rejected: ${handoffRejected}` : `schema-mismatch on "${requiredSchema}"`,
           });
           if (decision.shouldRetry) {
             retryScheduled = true;
@@ -807,8 +910,9 @@ async function invokeAgentAsync(opts: {
               retryDelayMs: decision.delayMs,
               remainingRetries: failurePolicy.maxRetries - attempt,
             });
-            const retryTrailer =
-              `[RETRY #${attempt} — 上次回复未通过输出校验：${vResult.reason ?? `缺少 requiredOutputSchema="${requiredSchema}" 要求的 [TAG] 块`}。请修正后重试，用正确 [TAG] 块 + 裸 JSON handoff 回复，不要重复上次的内容。]`;
+            const retryTrailer = handoffRejected !== null
+              ? `[RETRY #${attempt} — 上次回复中的 handoff JSON 未通过校验：${handoffRejected}。请修正 handoff JSON 后重发：顶层必须含 schemaVersion("2.0"/"2.1")、traceId、taskSummary、to 数组；每个 to 条目含 name 与 taskSummary。]`
+              : `[RETRY #${attempt} — 上次回复未通过输出校验：${failureDetail}。请修正后重试，用正确 [TAG] 块 + 裸 JSON handoff 回复，不要重复上次的内容。]`;
             void (async () => {
               await sleep(decision.delayMs);
               return invokeAgentAsync({
@@ -859,7 +963,7 @@ async function invokeAgentAsync(opts: {
             reason: "route-to-atlas",
             agentId: opts.agentId,
             traceId: opts.handoff?.traceId,
-            detail: `schema-mismatch on "${requiredSchema}" — routing to Atlas`,
+            detail: handoffRejected !== null ? `handoff rejected: ${handoffRejected} — routing to Atlas` : `schema-mismatch on "${requiredSchema}" — routing to Atlas`,
           });
         }
       }
@@ -970,7 +1074,7 @@ async function invokeAgentAsync(opts: {
         const barrier = fanOutOnWorkerDone({
           traceId: opts.handoff?.traceId ?? "",
           roomId: opts.roomId,
-          worker: opts.agentId,
+          worker: workerKey,
           content: result.content,
           handoff: emittedHandoff,
         });
@@ -1009,7 +1113,7 @@ async function invokeAgentAsync(opts: {
           const barrier = fanOutOnWorkerDone({
             traceId: opts.handoff?.traceId ?? "",
             roomId: opts.roomId,
-            worker: opts.agentId,
+            worker: workerKey,
             content: result.content,
             handoff: failDirective,
           });
@@ -1056,7 +1160,7 @@ async function invokeAgentAsync(opts: {
       });
       sendAll("system.warning", { roomId: opts.roomId, reason: "agent-error", agentId: opts.agentId, error: errMsg });
     } finally {
-      drainQueue(opts.roomId, opts.agentId);
+      drainQueue(opts.roomId, opts.agentId, opts.instance);
     }
   };
 

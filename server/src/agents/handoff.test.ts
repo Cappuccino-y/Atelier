@@ -25,6 +25,26 @@ describe("parseHandoff — v2 wire schema", () => {
     assert.equal(d.requiredOutputSchema, "result_block");
   });
 
+  it("salvages a missing top-level taskSummary from per-target briefs", () => {
+    // Production regression (2026-09-09): Atlas fanned out to [forge, lens]
+    // with per-target taskSummary entries but omitted the required
+    // top-level taskSummary → parseHandoff null → directives [] → the
+    // whole chain silently dead-ended. The top-level field is display-only
+    // context, so the parser now derives it instead of rejecting.
+    const content = '{"schemaVersion":"2.1","traceId":"isil-a1","to":[{"name":"forge","taskSummary":"audit code structure"},{"name":"lens","taskSummary":"audit light-mode visuals"}]}';
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "must parse via salvage");
+    assert.equal(d.taskSummary, "audit code structure / audit light-mode visuals");
+  });
+
+  it("keeps rejecting when there is nothing to salvage from", () => {
+    const content = '{"schemaVersion":"2.1","traceId":"isil-a2","to":["forge"]}';
+    const diag = diagnoseHandoffFailure(content, locator);
+    assert.ok(diag, "no per-target briefs → still rejected with a reason");
+    assert.match(diag!, /taskSummary/);
+    assert.equal(parseHandoff(content, locator), null);
+  });
+
   it("preserves an explicitly supplied traceId", () => {
     const content = "```handoff\n" +
       '{"schemaVersion":"2.1","traceId":"trace-42","to":["lens"],"taskSummary":"review","intent":"verify_fix"}\n' +

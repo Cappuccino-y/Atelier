@@ -27,7 +27,7 @@
 import { db } from "../db.js";
 import { nanoid } from "nanoid";
 import { debugLog } from "./debug.js";
-import { getRoleProfile } from "./runtime.js";
+import { getRoleProfile, fetchScopedRows } from "./runtime.js";
 import { runOpenCodeAgent } from "./process-agent.js";
 import { resolveAgentModel, config } from "../config.js";
 
@@ -145,36 +145,26 @@ export function countUnsummarized(roomId: string, profileKey: string): {
 
 /**
  * Fetch candidate messages (older than the kept tail) for summarization.
- * Applies the role profile's allowedAuthors filter so per-profile
- * summaries only cover that role's relevant scope — matches the
- * industry "scoped context" pattern (Atlas sees everything, specialists
- * see their slice).
+ * Applies the role profile's tag-subscription filter (shared helper in
+ * runtime.ts) so per-profile summaries only cover that role's relevant
+ * scope — the summary must match exactly what the agent sees in
+ * [HISTORY], just for the older segment of the room.
  */
 function fetchCandidates(roomId: string, profileKey: string, limit: number): CandidateMsg[] {
   const last = getLatestSummary(roomId, profileKey);
   const lastTs = last?.up_to_timestamp ?? 0;
   const profile = getRoleProfile(profileKey);
-  const allowed = profile.allowedAuthors === "all"
-    ? null
-    : new Set(profile.allowedAuthors.map(a => a.toLowerCase()));
 
-  const rows = db.prepare(`
-    SELECT id, author_id, content, tags, timestamp FROM messages
-    WHERE room_id = ? AND timestamp > ?
-    ORDER BY timestamp ASC LIMIT ?
-  `).all(roomId, lastTs, limit) as CandidateMsg[];
-
-  // Apply author filter; keep the agent's OWN messages even if outside scope
-  // (same rule as loadRoomThread so summaries match what the agent sees).
-  const filtered = rows.filter(m => {
-    const a = m.author_id.toLowerCase();
-    if (!allowed) return true;
-    return allowed.has(a) || a === profileKey.toLowerCase();
+  const rows = fetchScopedRows(roomId, {
+    agentId: profileKey,
+    profile,
+    limit,
+    order: "asc",
+    afterTs: lastTs,
   });
 
-  // Strip tags array parsing from each row (it's already an array from
-  // better-sqlite3; tags JSON is small).
-  return filtered.map(m => ({
+  // Normalize tags to a string[] (rows carry the raw JSON column).
+  return rows.map(m => ({
     ...m,
     tags: Array.isArray(m.tags) ? m.tags : (typeof m.tags === "string" ? JSON.parse(m.tags || "[]") : []),
   }));

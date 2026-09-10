@@ -7,7 +7,7 @@ import {
   formatMemoryBlock,
   appendMemory,
 } from "./memory.js";
-import { parseMemoryEntry } from "./handoff.js";
+import { parseMemoryEntry, TAG_VOCABULARY } from "./handoff.js";
 import { debugLog } from "./debug.js";
 import { formatSummaryBlock } from "./summarizer.js";
 
@@ -31,54 +31,71 @@ const HISTORY_BUDGET = 60_000;
  * intermediate reasoning from agents outside their workflow. Each profile
  * pins:
  *
- *   - historyLimit    — max messages to load for this role
- *   - allowedAuthors  — "all" to keep current behavior, or an explicit
- *                       agent-id whitelist to filter out noise. Empty array
- *                       means "only user".
- *   - otherTruncate   — per-message char cap for messages NOT authored by
- *                       this agent (own messages stay whole).
+ *   - historyLimit     — max messages to load for this role
+ *   - subscribeTags    — MetaGPT-style publish-subscribe (v2.2): a message
+ *                        is visible to this role when its FINAL [TAG] block
+ *                        (the one extractFinalResult would keep) is in this
+ *                        set. This replaces the earlier author-whitelist
+ *                        approach — filtering by WHAT was produced instead
+ *                        of WHO produced it. "all" keeps the unfiltered
+ *                        room view (orchestrator / reviewer / analyst).
+ *   - allowUser        — whether raw user messages (which carry no [TAG])
+ *                        are visible. User intent is almost always wanted.
+ *   - otherTruncate    — per-message char cap for messages NOT authored by
+ *                        this agent (own messages stay whole).
  *   - keepIntermediate — if false, STATUS-only / tool-heavy messages get
  *                        their intermediate reasoning stripped before
  *                        injection (see extractFinalResult).
+ *
+ * The tag filter composes with keepIntermediate=false: only the final TAG
+ * block of a matching message is injected, so a subscribed role effectively
+ * receives "the last deliverable block of every message whose deliverable
+ * type it subscribes to".
  *
  * Tweak the table here as roles evolve; tests don't depend on exact
  * values, only on "atlas gets more than echo" type invariants.
  */
 export type RoleContextProfile = {
   historyLimit: number;
-  allowedAuthors: "all" | string[];
+  subscribeTags: "all" | string[];
+  allowUser: boolean;
   otherTruncate: number;
   keepIntermediate: boolean;
 };
 
 export const ROLE_CONTEXT_PROFILE: Record<string, RoleContextProfile> = {
   // Orchestrator needs the full picture to route + summarize.
-  atlas:     { historyLimit: 30, allowedAuthors: "all",                                      otherTruncate: 800,  keepIntermediate: true  },
-  // Implementer cares about user intent + own progress + Lens feedback.
-  // Other research/analysis threads are noise (Lens will surface them via
-  // its [REVIEW] block if relevant).
-  forge:     { historyLimit: 16, allowedAuthors: ["user","forge","lens","atlas"],            otherTruncate: 500,  keepIntermediate: false },
+  atlas:     { historyLimit: 30, subscribeTags: "all", allowUser: true, otherTruncate: 800,  keepIntermediate: true  },
+  // Implementer: user intent (always) + anyone's REVIEW / RESULT / DECISION /
+  // QUESTION / BLOCKER. Scout's [RESEARCH] reaches Forge through Atlas's
+  // handoff payload (outputHighlights), not raw history — compressed-conduit
+  // design (Anthropic orchestrator-worker).
+  forge:     { historyLimit: 16, subscribeTags: ["REVIEW", "RESULT", "DECISION", "QUESTION", "BLOCKER"], allowUser: true, otherTruncate: 500,  keepIntermediate: false },
   // Reviewer wants everything (full context = fair review) but can absorb
   // bigger excerpts since decisions hinge on nuance.
-  lens:      { historyLimit: 20, allowedAuthors: "all",                                      otherTruncate: 1500, keepIntermediate: true  },
+  lens:      { historyLimit: 20, subscribeTags: "all", allowUser: true, otherTruncate: 1500, keepIntermediate: true  },
   // Fallback — short fallback replies; aggressive trim is fine.
-  echo:      { historyLimit: 8,  allowedAuthors: "all",                                      otherTruncate: 400,  keepIntermediate: false },
-  // Researcher — user intent + Atlas dispatch + own previous progress.
-  scout:     { historyLimit: 18, allowedAuthors: ["user","atlas","scout"],                  otherTruncate: 600,  keepIntermediate: false },
-  // Trainer — feedback from Archivist + Atlas (workflow context).
-  trainer:   { historyLimit: 12, allowedAuthors: ["archivist","atlas"],                    otherTruncate: 600,  keepIntermediate: false },
+  echo:      { historyLimit: 8,  subscribeTags: "all", allowUser: true, otherTruncate: 400,  keepIntermediate: false },
+  // Researcher — user intent + coordination signals (questions, decisions,
+  // blockers). The actual dispatch content arrives via the handoff payload.
+  scout:     { historyLimit: 18, subscribeTags: ["QUESTION", "DECISION", "BLOCKER"], allowUser: true, otherTruncate: 600,  keepIntermediate: false },
+  // Trainer — harvests successful patterns: any agent's final RESULT /
+  // DECISION plus RULES from other trainers. Fixes the earlier mismatch
+  // where the persona said "receive patterns from user/any agent" but the
+  // author whitelist only let archivist+atlas through.
+  trainer:   { historyLimit: 12, subscribeTags: ["RESULT", "DECISION", "RULES"], allowUser: true, otherTruncate: 600,  keepIntermediate: false },
   // Analyst — full context but with substantial excerpts preserved.
-  analyst:   { historyLimit: 20, allowedAuthors: "all",                                      otherTruncate: 1200, keepIntermediate: true  },
-  // Writer — sees the upstream pipeline (research → analysis), not the
-  // implementation chatter.
-  writer:    { historyLimit: 20, allowedAuthors: ["user","atlas","scout","analyst"],        otherTruncate: 1000, keepIntermediate: false },
+  analyst:   { historyLimit: 20, subscribeTags: "all", allowUser: true, otherTruncate: 1200, keepIntermediate: true  },
+  // Writer — consumes the research → analysis pipeline deliverables
+  // wherever they were produced, not the implementation chatter.
+  writer:    { historyLimit: 20, subscribeTags: ["RESEARCH", "ANALYSIS", "DOCUMENT", "DECISION"], allowUser: true, otherTruncate: 1000, keepIntermediate: false },
   // Archivist — needs the most context to spot evergreen patterns.
-  archivist: { historyLimit: 25, allowedAuthors: "all",                                      otherTruncate: 800,  keepIntermediate: true  },
+  archivist: { historyLimit: 25, subscribeTags: "all", allowUser: true, otherTruncate: 800,  keepIntermediate: true  },
 };
 
 export function getRoleProfile(agentId: string): RoleContextProfile {
   return ROLE_CONTEXT_PROFILE[agentId.toLowerCase()]
-    ?? { historyLimit: HISTORY_LIMIT, allowedAuthors: "all", otherTruncate: OTHER_TRUNCATE, keepIntermediate: true };
+    ?? { historyLimit: HISTORY_LIMIT, subscribeTags: "all", allowUser: true, otherTruncate: OTHER_TRUNCATE, keepIntermediate: true };
 }
 
 export type ChatMessage = {
@@ -86,7 +103,28 @@ export type ChatMessage = {
   content: string;
 };
 
-type Row = { author_id: string; content: string; timestamp: number; reactions: string; tags: string };
+type Row = { id: string; author_id: string; content: string; timestamp: number; reactions: string; tags: string };
+
+/** Tag matcher derived from the shared vocabulary (suffix-tolerant:
+ *  [RESULT], [RESULT:DEPRECATE], [RESULT:xyz] all count as RESULT). */
+const FINAL_TAG_RE = new RegExp(
+  `\\[(${TAG_VOCABULARY.join("|")})(?::DEPRECATE)?(?::\\w+)?\\]`,
+  "gi",
+);
+
+/**
+ * Return the LAST [TAG] marker in the content (its "final deliverable
+ * type"), or null for free-form prose. Deliberately aligned with
+ * extractFinalResult: the block that survives stripping is exactly the
+ * block this function points at, so the role subscription filter and the
+ * stripper can never disagree about what a message IS.
+ */
+export function lastTag(content: string): string | null {
+  if (!content) return null;
+  let last: string | null = null;
+  for (const m of content.matchAll(FINAL_TAG_RE)) last = m[1].toUpperCase();
+  return last;
+}
 
 /**
  * Strip intermediate reasoning from a message body, leaving only the
@@ -94,24 +132,27 @@ type Row = { author_id: string; content: string; timestamp: number; reactions: s
  * STATUS-heavy / tool-spammy messages from polluting downstream agent
  * context.
  */
-export function extractFinalResult(content: string, tags: string[]): string {
+export function extractFinalResult(content: string): string {
   if (!content) return "";
   // If the message has no [TAG] markers at all, it's free-form prose —
   // keep the last paragraph + any headings as a sensible tail.
-  const tagMatches = content.match(/\[(RESULT|REVIEW|QUESTION|DECISION|BLOCKER|TODO|RESEARCH|ANALYSIS|DOCUMENT|VISUAL|MEMORY|STATUS)\]/gi);
-  if (!tagMatches || tagMatches.length === 0) {
+  let lastTagToken: string | null = null;
+  let lastTagIdx = -1;
+  for (const m of content.matchAll(FINAL_TAG_RE)) {
+    lastTagToken = m[0];
+    lastTagIdx = m.index ?? -1;
+  }
+  if (!lastTagToken || lastTagIdx < 0) {
     // Free-form prose: keep the last 2 paragraphs (most recent decisions).
     const paras = content.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
     if (paras.length <= 2) return content.trim();
     return paras.slice(-2).join("\n\n");
   }
   // Has [TAG] blocks — keep only the LAST block (the "real" deliverable).
-  // We find the last `\[TAG]` token and cut everything before it, then trim
-  // any text that comes AFTER the last `\[TAG]` (usually a handoff JSON or
-  // `[handoff task]` trailer, which would have been stripped already by
-  // stripHandoffBlock at insert time, but be defensive).
-  const lastTagIdx = content.lastIndexOf(tagMatches[tagMatches.length - 1]);
-  if (lastTagIdx < 0) return content.trim();
+  // We cut everything before the last `[TAG]` token, then trim any text
+  // that comes AFTER it (usually a handoff JSON or `[handoff task]`
+  // trailer, which would have been stripped already by stripHandoffBlock
+  // at insert time, but be defensive).
   const tail = content.slice(lastTagIdx);
   // The tail may include a handoff JSON block after the [TAG] paragraph —
   // also trim that out so the rendered [HISTORY] doesn't show routing meta.
@@ -125,24 +166,70 @@ export function extractFinalResult(content: string, tags: string[]): string {
 }
 
 /**
+ * Does this message fall inside the role's context scope? Three gates,
+ * evaluated in order:
+ *   1. own messages always pass (self-history is always valuable)
+ *   2. user messages pass iff the profile allows them (they carry no TAG)
+ *   3. otherwise, "all" subscribes see everything; subscribed roles see
+ *      the message only when its FINAL [TAG] matches their subscription.
+ */
+function profileAdmits(p: RoleContextProfile, agentId: string, authorId: string, content: string): boolean {
+  if (authorId.toLowerCase() === agentId.toLowerCase()) return true;
+  if (p.allowUser && authorId.toLowerCase() === "user") return true;
+  if (p.subscribeTags === "all") return true;
+  const last = lastTag(content);
+  if (!last) return false;
+  return p.subscribeTags.some(t => t.toUpperCase() === last);
+}
+
+/**
+ * Fetch up to `limit` in-scope messages for a role. Subscribed roles
+ * (tag-filtered) paginate through the room instead of one fixed LIMIT —
+ * a tag filter's hit-rate is lower than the old author filter's, so a
+ * fixed oversized pool could still under-fill historyLimit.
+ */
+export function fetchScopedRows(roomId: string, opts: {
+  agentId: string;
+  profile: RoleContextProfile;
+  limit: number;
+  order?: "asc" | "desc";
+  afterTs?: number;
+}): Row[] {
+  const { agentId, profile, limit, order = "desc", afterTs } = opts;
+  const filtered = profile.subscribeTags !== "all";
+  const PAGE = 120;
+  const sql = `
+    SELECT id, author_id, content, timestamp, reactions, tags FROM messages
+    WHERE room_id = ? ${afterTs != null ? "AND timestamp > ?" : ""}
+    ORDER BY timestamp ${order === "asc" ? "ASC" : "DESC"}
+    LIMIT ? OFFSET ?
+  `;
+  const stmt = db.prepare(sql);
+  const out: Row[] = [];
+  let offset = 0;
+  while (out.length < limit) {
+    const page = (afterTs != null
+      ? stmt.all(roomId, afterTs, PAGE, offset)
+      : stmt.all(roomId, PAGE, offset)) as Row[];
+    if (page.length === 0) break;
+    for (const m of page) {
+      if (filtered && !profileAdmits(profile, agentId, m.author_id, m.content)) continue;
+      out.push(m);
+      if (out.length >= limit) break;
+    }
+    offset += page.length;
+    if (page.length < PAGE) break;
+  }
+  return out;
+}
+
+/**
  * Load recent room messages, filtered and truncated per the calling agent's
  * role profile. The thread that gets rendered into the [HISTORY] block.
  */
 export function loadRoomThread(roomId: string, agentId: string, profile?: RoleContextProfile): ChatMessage[] {
   const p = profile ?? getRoleProfile(agentId);
-  const allowed = p.allowedAuthors === "all"
-    ? null
-    : new Set(p.allowedAuthors.map(a => a.toLowerCase()));
-
-  // Pull a slightly bigger candidate pool than the profile cap so author
-  // filtering has room to discard messages; limit is reapplied after
-  // filtering.
-  const candidateLimit = allowed ? p.historyLimit * 3 : p.historyLimit;
-  const rows = db.prepare(`
-    SELECT author_id, content, timestamp, reactions, tags FROM messages
-    WHERE room_id = ?
-    ORDER BY timestamp DESC LIMIT ?
-  `).all(roomId, candidateLimit) as Row[];
+  const rows = fetchScopedRows(roomId, { agentId, profile: p, limit: p.historyLimit });
 
   // Walk newest→oldest, keeping own messages whole until the budget is
   // exhausted; after that even own messages get truncated so the total
@@ -151,14 +238,6 @@ export function loadRoomThread(roomId: string, agentId: string, profile?: RoleCo
   let budget = HISTORY_BUDGET;
   let totalAdded = 0;
   for (const m of rows) {
-    const authorLower = m.author_id.toLowerCase();
-    if (allowed && !allowed.has(authorLower) && authorLower !== agentId.toLowerCase()) {
-      // Filter: drop messages from agents outside this role's allowed
-      // authors list. We still let the agent's OWN messages through even if
-      // they're not in the allow-list (atlas might handoff to itself in
-      // certain paths, and keeping self-history is always valuable).
-      continue;
-    }
     if (totalAdded >= p.historyLimit) break;
 
     const isSelf = m.author_id === agentId;
@@ -181,12 +260,9 @@ export function loadRoomThread(roomId: string, agentId: string, profile?: RoleCo
     // long STATUS streams). `keepIntermediate` is per-profile; roles that
     // need full reasoning for fair reviews (lens / analyst / archivist)
     // keep it.
-    const messageTags = (() => {
-      try { return JSON.parse(m.tags || "[]") as string[]; } catch { return []; }
-    })();
     let body = (p.keepIntermediate || isSelf)
       ? raw
-      : extractFinalResult(raw, messageTags);
+      : extractFinalResult(raw);
     body = body + reactionLine;
 
     const size = stamp.length + body.length;
@@ -226,15 +302,17 @@ function buildContextBlocks(agentId: string, roomId: string): string {
     .map((m) => `${m.role === "assistant" ? "[ASSISTANT]" : "[USER]"}\n${m.content}`)
     .join("\n\n");
 
-  const allowedAuthorsDesc = profile.allowedAuthors === "all"
-    ? "all"
-    : `only ${profile.allowedAuthors.join(", ")}`;
+  const subscribesDesc = profile.subscribeTags === "all"
+    ? "all (full room view)"
+    : profile.subscribeTags.join("/");
   const header =
     `[CONTEXT HEADER — your history scope]\n` +
     `profile: role=${agentId}; keep_last=${profile.historyLimit}; ` +
-    `authors=${allowedAuthorsDesc}; truncate_other=${profile.otherTruncate}chars; ` +
+    `subscribes=${subscribesDesc}; user_visible=${profile.allowUser}; ` +
+    `truncate_other=${profile.otherTruncate}chars; ` +
     `intermediate_kept=${profile.keepIntermediate}\n` +
-    `(messages from authors not in your scope are filtered out — ` +
+    `(your [HISTORY] only contains your own messages, ${profile.allowUser ? "user messages, " : ""}` +
+    `and messages whose FINAL [TAG] block matches your subscription — ` +
     `do NOT assume you have the full room history. ` +
     `If you need broader context, ask Atlas.)`;
 

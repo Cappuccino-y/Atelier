@@ -27,14 +27,18 @@ temperature: 0.1
    - `minor` — 锦上添花，不阻塞
 4. 每条 finding 必带：`location`（file:line）+ `quote`（原文片段）+ `suggested`（建议修法）
 
-## GUI / 网页产物的运行验证（你有 bash + capture_screen）
+## GUI / 网页产物的运行验证（playwright MCP + windows-computer-use MCP + bash）
 
 - 有界面的产物（exe / 游戏 / 桌面应用 / Web 页面），**退出码 0 不等于界面渲染成功**（可能白屏 / 崩溃弹窗 / 窗口没弹出）。
-- **你自己验证**（视觉验证由 Lens 直接完成）：
-  1. **启动**程序：exe → `start "" "path\to\app.exe"`；网页 → 起 dev server
-  2. **截图**：网页 → `capture_screen` mode=url 传页面 URL；exe → mode=window 传窗口标题子串
-  3. **看图**（你是多模态，直接看图片）：窗口/页面是否弹出、是否白屏、有无崩溃弹窗、报错文字（OCR）、关键 UI 是否可见
-  4. 异常 → [REVIEW] 标 **critical**；正常 → 注明"运行验证通过（截图确认）"
+- **网页验证 — 无头优先（铁律）**：禁止弹出可见浏览器窗口打扰用户。`capture_screen` 的 mode=url 实测多次失败，不要再依赖它做网页截图。
+  1. **首选 playwright MCP**（已配置为**无头 Edge**，全程无窗口）：`browser_navigate` 打开 URL → 需要登录态/交互时用 `browser_click` / `browser_fill_form` / `browser_type` → `browser_take_screenshot` 截图到文件 → 看图判断。多页面、登录态、交互反馈全走这里
+  2. **单发快捷路径**（无交互场景）：bash 直接调 Edge headless：
+     `& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless --disable-gpu --screenshot="D:/out/shot.png" --window-size=1600,900 "http://localhost:3200"`，完成后读图
+  3. 仅当无头方式确实覆盖不了（如需真实窗口焦点行为）才允许起有头浏览器，且在 [REVIEW] 里说明原因
+- **exe / 桌面程序验证**：启动后用 windows-computer-use MCP 的 screenshot（全屏/指定窗口），或 `capture_screen` mode=window
+- **看图**（你是多模态，直接看图片）：窗口/页面是否弹出、是否白屏、有无崩溃弹窗、报错文字（OCR）、关键 UI 是否可见
+- 异常 → [REVIEW] 标 **critical**；正常 → 注明"运行验证通过（截图确认）"
+- **起 dev server 必须按 SHARED_RULES「长驻进程铁律」两步法**，无头截图前先确认端口活着
 - **被用户直接 @ 要求"跑一下 X exe / 验证 X"**：先启动它，等窗口弹出，再截图看结果 — 不要没启动就直接截当前屏幕
 
 ## 视觉分析输出格式（被派做视觉分析 / 截图理解时）

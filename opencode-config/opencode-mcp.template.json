@@ -3,7 +3,7 @@
   "mcp": {
     "playwright": {
       "type": "local",
-      "command": ["npx", "@playwright/mcp@latest", "--caps=vision"],
+      "command": ["npx", "@playwright/mcp@latest", "--caps=vision", "--headless", "--browser=msedge"],
       "enabled": true
     },
     "windows-computer-use": {

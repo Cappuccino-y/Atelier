@@ -206,6 +206,27 @@ if (-not $agentFiles) {
   }
 }
 
+# 1a-bis. ~/.config/opencode/tools/*.ts — custom agent tools referenced by the
+# personas (capture_screen is cited in atlas/forge/lens prompts; a fresh deploy
+# without it leaves those references dangling).
+$TemplateToolsDir = Join-Path $TemplateDir "tools"
+$OpencodeToolsDir = Join-Path $env:USERPROFILE ".config\opencode\tools"
+$toolFiles = Get-ChildItem -Path $TemplateToolsDir -Filter "*.ts" -ErrorAction SilentlyContinue
+if ($toolFiles) {
+  if (-not $DryRun -and -not (Test-Path $OpencodeToolsDir)) {
+    New-Item -ItemType Directory -Path $OpencodeToolsDir -Force | Out-Null
+  }
+  foreach ($f in $toolFiles) {
+    $dest = Join-Path $OpencodeToolsDir $f.Name
+    if ((Test-Path $dest) -and -not $ForceAgents) {
+      Say "  [=] tools/$($f.Name) - exists (use -ForceAgents to overwrite)"
+    } else {
+      if (-not $DryRun) { Copy-Item -LiteralPath $f.FullName -Destination $dest -Force }
+      Ok "tools/$($f.Name) -> $dest"
+    }
+  }
+}
+
 # 1b. server/.env from .env.example
 if (-not $DryRun -and -not (Test-Path $ServerEnv)) {
   $envExample = Join-Path $Root "server\.env.example"
@@ -464,28 +485,57 @@ if ($SkipPython) {
 Head "4b/7  Install lens MCP tooling (playwright + windows-computer-use)"
 
 # @playwright/mcp — global npm package (web screenshots via `npx`).
+# The MCP command itself is `npx @playwright/mcp@latest ...`, so the npx cache
+# is what actually matters; the global install is only a pre-warm. Any failure
+# along the way (corporate proxy, PS 5.1 npm shim quirks) falls back to warming
+# the npx cache directly before declaring failure.
+$pwInstalled = $false
 try {
-  $pw = & npm ls -g @playwright/mcp 2>$null | Select-String -Pattern "@playwright/mcp@" | Select-Object -First 1
-  if ($pw) {
-    Ok "@playwright/mcp already installed globally"
+  $out = & npm.cmd ls -g @playwright/mcp 2>$null
+  $pwInstalled = ($out | Select-String -Pattern "@playwright/mcp@") -ne $null
+} catch { $pwInstalled = $false }
+
+if ($pwInstalled) {
+  Ok "@playwright/mcp already installed globally"
+} elseif ($DryRun) {
+  Say "  -> would run: npm install -g @playwright/mcp (fallback: npx cache warm)"
+} else {
+  Say "  -> installing @playwright/mcp (global) ..."
+  $installOk = $false
+  try {
+    & npm.cmd install -g @playwright/mcp 2>&1 | Out-Null
+    $installOk = ($LASTEXITCODE -eq 0)
+  } catch { $installOk = $false }
+  if ($installOk) {
+    Ok "@playwright/mcp installed"
   } else {
-    if ($DryRun) { Say "  -> would run: npm install -g @playwright/mcp" }
-    else {
-      Say "  -> installing @playwright/mcp (global) ..."
-      & npm install -g @playwright/mcp 2>&1 | Out-Null
-      if ($LASTEXITCODE -eq 0) { Ok "@playwright/mcp installed" }
-      else { Warn "@playwright/mcp install failed — lens web screenshots unavailable" }
+    Say "  -> global install failed, warming npx cache instead ..."
+    $npxOk = $false
+    try {
+      & npx.cmd -y @playwright/mcp@latest --version 2>&1 | Out-Null
+      $npxOk = ($LASTEXITCODE -eq 0)
+    } catch { $npxOk = $false }
+    if ($npxOk) {
+      Ok "@playwright/mcp ready via npx cache (global install skipped)"
+    } else {
+      Warn "@playwright/mcp unavailable — lens web screenshots offline"
     }
   }
-} catch {
-  Warn "could not check @playwright/mcp: $_"
 }
 
 # windows-computer-use-mcp — isolated venv at server/.venv-wcu (needs mcp<2,
 # which would clash with the global anaconda mcp 2.x). Same shape as the
 # Proserpina venv above.
 $wcuPyExe = Join-Path $WcuVenv "Scripts\python.exe"
+# Ready = venv python exists AND the module actually imports (a venv created but
+# with the pip install failed/aborted would otherwise report ready and leave the
+# lens desktop-screenshot MCP silently broken).
+$wcuReady = $false
 if (Test-Path $wcuPyExe) {
+  & $wcuPyExe -c "import windows_computer_use" *> $null
+  $wcuReady = ($LASTEXITCODE -eq 0)
+}
+if ($wcuReady) {
   Ok "server\.venv-wcu exists (windows-computer-use ready)"
 } elseif (-not $pythonOk) {
   Warn "Python not available — skipping windows-computer-use (lens desktop screenshots offline)"
