@@ -117,6 +117,7 @@ export type AgentStatus = "online" | "offline" | "busy" | "idle";
 export type ServerEvent =
   | "message.created"
   | "message.updated"
+  | "message.deleted"
   | "task.created"
   | "task.updated"
   | "task.deleted"

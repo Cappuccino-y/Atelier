@@ -50,6 +50,7 @@ type Props = {
   onDeleteProject: (id: string, name: string) => void;
   onMoveRoom: (roomId: string, projectId: string | null) => void;
   onShowChain: (message: Message) => void;
+  onDeleteMessage: (message: Message) => void;
   memoryEntries: MemoryEntry[];
 };
 
@@ -147,6 +148,7 @@ export function AppShell(props: Props) {
                 agents={props.agents}
                 onReply={handleReply}
                 onShowChain={props.onShowChain}
+                onDeleteMessage={props.onDeleteMessage}
               />
               <RunningDock
                 runs={runningRuns}

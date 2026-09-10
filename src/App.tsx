@@ -119,7 +119,9 @@ export default function App() {
         const agent = agentMap.get(r.agentId);
         if (!agent) return null;
         perAgent[r.agentId] = (perAgent[r.agentId] ?? 0) + 1;
-        const sKey = `${currentRoomId}:${r.agentId}`;
+        // per-run stream buffers (runId-keyed): parallel same-role instances
+        // each surface their own tool + tail in the dock
+        const sKey = r.runId ? `${currentRoomId}:${r.runId}` : `${currentRoomId}:${r.agentId}`;
         return {
           key: r.key,
           agent,
@@ -377,6 +379,13 @@ export default function App() {
           }
           break;
         }
+        case "message.deleted": {
+          const p = payload as { roomId: string; messageId: string };
+          if (p.roomId === currentRoomId) {
+            setMessages(curr => curr.filter(m => m.id !== p.messageId));
+          }
+          break;
+        }
         case "task.created": {
           const t = payload as Task;
           if (t.roomId === currentRoomId) setTasks(curr => [t, ...curr]);
@@ -470,9 +479,12 @@ export default function App() {
           break;
         }
         case "agent.tool_call": {
-          const p = payload as { roomId: string; agentId: string; tool: string };
+          const p = payload as { roomId: string; agentId: string; runId?: string; tool: string };
           if (p.roomId === currentRoomId && p.agentId) {
-            streamToolRef.current[`${p.roomId}:${p.agentId}`] = p.tool;
+            // per-RUN key: parallel same-role instances (forge/forge#2) each
+            // get their own tool chip + streaming tail in the running dock
+            const tKey = p.runId ? `${p.roomId}:${p.runId}` : `${p.roomId}:${p.agentId}`;
+            streamToolRef.current[tKey] = p.tool;
             scheduleFlush();
           }
           // heartbeats bump every open run of this agent (runId is not on
@@ -500,9 +512,9 @@ export default function App() {
           break;
         }
         case "agent.text_delta": {
-          const p = payload as { roomId: string; agentId: string; delta: string };
+          const p = payload as { roomId: string; agentId: string; runId?: string; delta: string };
           if (p.roomId === currentRoomId && p.agentId) {
-            const key = `${p.roomId}:${p.agentId}`;
+            const key = p.runId ? `${p.roomId}:${p.runId}` : `${p.roomId}:${p.agentId}`;
             streamBufferRef.current[key] = (streamBufferRef.current[key] ?? "") + p.delta;
             scheduleFlush();
           }
@@ -553,18 +565,25 @@ export default function App() {
             return next;
           });
           // clear streaming buffers immediately (not via rAF) so no stale delta
-          // leaks into a future run by the same agent.
+          // leaks into a future run by the same agent. Both the agentId-keyed
+          // and runId-keyed buffers are cleared (parallel instances buffer
+          // under their own runId).
           const streamKey = `${p.roomId}:${p.agentId}`;
-          delete streamBufferRef.current[streamKey];
-          delete streamToolRef.current[streamKey];
+          const runStreamKey = p.runId ? `${p.roomId}:${p.runId}` : streamKey;
+          for (const sk of new Set([streamKey, runStreamKey])) {
+            delete streamBufferRef.current[sk];
+            delete streamToolRef.current[sk];
+          }
           setStreamingText(curr => {
             const next = { ...curr };
             delete next[streamKey];
+            delete next[runStreamKey];
             return next;
           });
           setStreamingTool(curr => {
             const next = { ...curr };
             delete next[streamKey];
+            delete next[runStreamKey];
             return next;
           });
           pushActivity({
@@ -578,7 +597,7 @@ export default function App() {
           break;
         }
         case "agent.error": {
-          const p = payload as { roomId: string; agentId: string; error: string };
+          const p = payload as { roomId: string; agentId: string; runId?: string; error: string };
           setLiveRuns(prev => {
             const next = { ...prev };
             for (const k of Object.keys(next)) {
@@ -588,17 +607,22 @@ export default function App() {
             }
             return next;
           });
-          const streamKey = `${p.roomId}:${p.agentId}`;
-          delete streamBufferRef.current[streamKey];
-          delete streamToolRef.current[streamKey];
+          const streamKey2 = `${p.roomId}:${p.agentId}`;
+          const runStreamKey2 = p.runId ? `${p.roomId}:${p.runId}` : streamKey2;
+          for (const sk of new Set([streamKey2, runStreamKey2])) {
+            delete streamBufferRef.current[sk];
+            delete streamToolRef.current[sk];
+          }
           setStreamingText(curr => {
             const next = { ...curr };
-            delete next[streamKey];
+            delete next[streamKey2];
+            delete next[runStreamKey2];
             return next;
           });
           setStreamingTool(curr => {
             const next = { ...curr };
-            delete next[streamKey];
+            delete next[streamKey2];
+            delete next[runStreamKey2];
             return next;
           });
           pushActivity({
@@ -839,6 +863,24 @@ export default function App() {
     api.selfTalkTick(currentRoomId).catch(() => {});
   }, [currentRoomId]);
 
+  const handleDeleteMessage = useCallback((message: Message) => {
+    if (!currentRoomId) return;
+    setConfirm({
+      title: "Delete this message?",
+      description: "It will be removed from the room history for everyone. This cannot be undone.",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          await api.deleteMessage(currentRoomId, message.id);
+          setMessages(curr => curr.filter(m => m.id !== message.id));
+          toast.info("Message deleted");
+        } catch (err) {
+          toast.error("Failed to delete message", { detail: String(err) });
+        }
+      },
+    });
+  }, [currentRoomId]);
+
   const handleStopAgent = useCallback(async (agentId: string, runId?: string) => {
     if (!currentRoomId) return;
     // prefer the row's own runId; otherwise the server resolves by agent alias
@@ -956,6 +998,7 @@ export default function App() {
         onDeleteProject={handleDeleteProject}
         onMoveRoom={handleMoveRoom}
         onShowChain={(m) => setChainMessage(m)}
+        onDeleteMessage={handleDeleteMessage}
         memoryEntries={memoryEntries}
       />
 

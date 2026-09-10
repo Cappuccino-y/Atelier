@@ -78,6 +78,24 @@ export async function routes(app: FastifyInstance) {
     }
   );
 
+  // Delete a single message from the room history (user housekeeping —
+  // removes noise like zombie/error rows). Broadcasts message.deleted so
+  // every connected client drops it from its list.
+  app.delete<{ Params: { roomId: string; messageId: string } }>(
+    "/api/rooms/:roomId/messages/:messageId",
+    async (req, reply) => {
+      const row = db.prepare("SELECT id FROM messages WHERE id = ? AND room_id = ?")
+        .get(req.params.messageId, req.params.roomId) as { id: string } | undefined;
+      if (!row) return reply.code(404).send({ error: "message not found" });
+      db.prepare("DELETE FROM messages WHERE id = ?").run(req.params.messageId);
+      sendAll("message.deleted", {
+        roomId: req.params.roomId,
+        messageId: req.params.messageId,
+      });
+      return { ok: true };
+    }
+  );
+
   // Finding lifecycle — accept/reject a single finding (by index) or all at
   // once. Persists the decision on the message row so it survives reloads and
   // re-broadcasts the findings state to every connected client.

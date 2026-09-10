@@ -139,6 +139,9 @@ export const api = {
       "/api/runtime/runs"
     ),
 
+  deleteMessage: (roomId: string, messageId: string) =>
+    request<{ ok: true }>(`/api/rooms/${roomId}/messages/${messageId}`, { method: "DELETE" }),
+
   mcpRooms: () => request<{ rooms: Array<{ id: string; name: string }> }>("/mcp/rooms"),
 
   debugLog: (body: { level?: string; tag?: string; message: string; data?: unknown }) =>

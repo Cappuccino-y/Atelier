@@ -11,10 +11,11 @@ type Props = {
   roomId?: string;
   onReply?: (text: string, targetAgentName: string) => void;
   onShowChain?: (message: Message) => void;
+  onDeleteMessage?: (message: Message) => void;
 };
 
 export function MessageList({
-  messages, agents, roomId, onReply, onShowChain,
+  messages, agents, roomId, onReply, onShowChain, onDeleteMessage,
 }: Props) {
   const ref = useRef<VirtuosoHandle>(null);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
@@ -109,6 +110,7 @@ return (
               index={index}
               onReply={onReply}
               onShowChain={onShowChain}
+              onDelete={onDeleteMessage}
             />
           );
         }}

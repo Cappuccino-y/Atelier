@@ -17,6 +17,7 @@ import {
   Check,
   X,
   Waypoints,
+  Trash2,
 } from "lucide-react";
 import { useState, useCallback, useEffect, memo } from "react";
 import { api } from "@/lib/api";
@@ -30,6 +31,7 @@ type Props = {
   index?: number;
   onReply?: (text: string, targetAgentName: string) => void;
   onShowChain?: (message: Message) => void;
+  onDelete?: (message: Message) => void;
 };
 
 const SEVERITY_STYLE: Record<string, { bar: string; badge: string }> = {
@@ -714,6 +716,7 @@ export const MessageItem = memo(function MessageItem({
   index = 0,
   onReply,
   onShowChain,
+  onDelete,
 }: Props) {
   const isUser = message.authorId === "user";
   // Inline handoff JSON → structured card (non-user messages only).
@@ -907,6 +910,15 @@ export const MessageItem = memo(function MessageItem({
                 >
                   <Copy className="h-3 w-3" />
                 </button>
+                {onDelete && (
+                  <button
+                    onClick={() => onDelete(message)}
+                    className="h-6 w-6 rounded-md bg-white border border-zinc-200 shadow-sm flex items-center justify-center text-zinc-500 hover:text-red-600 hover:border-red-200"
+                    title="Delete message"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
               </div>
               {copied && (
                 <span
