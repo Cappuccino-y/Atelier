@@ -1,9 +1,10 @@
 ﻿# atelier.ps1 - master controller
 # Usage:
-#   atelier            -> start (default)
-#   atelier start      -> kill old port procs + start all + open browser
+#   atelier            -> start (default; refuses when already running)
+#   atelier start      -> start all + open browser, ONLY when nothing is
+#                         running - start never kills an existing instance
 #   atelier stop       -> kill processes on atelier ports
-#   atelier restart    -> stop + start
+#   atelier restart    -> stop + start (the only way to restart)
 #   atelier status     -> show port bindings
 #   atelier logs <n>   -> tail logs (server|frontend|proserpina)
 #   atelier deploy     -> one-click env setup (forwarded to deploy.ps1)
@@ -138,39 +139,45 @@ function Start-Svc([string]$Name, [string]$Cwd, [string]$Cmd, [string[]]$CmdArgs
   [void][System.Diagnostics.Process]::Start($psi)
 }
 
-function Start-Atelier {
-  Say "[atelier] starting..."
-
-  $t0 = [System.Diagnostics.Stopwatch]::StartNew()
-  $killed = Stop-AtelierPorts
-  if ($killed -gt 0) {
-    Say "[atelier] killed $killed old process(es) on ports $($Ports.Values -join ',')" "Yellow"
-  }
-
-  # Wait until each port is actually free (or 5s budget). Without this,
-  # the next tsx watch hits EADDRINUSE and dies because the OS hasn't
-  # recycled the lingering TIME_WAIT/CLOSE_WAIT socket yet.
-  if ($killed -gt 0) {
-    $released = $false
-    for ($w = 0; $w -lt 50; $w++) {
-      $stillBound = $false
-      $out = & netstat.exe -ano -p TCP 2>$null
-      foreach ($port in $Ports.Values) {
-        foreach ($line in $out) {
-          if ($line -match ":$port\s+\S+\s+LISTENING\s+\d+") {
-            $stillBound = $true
-            break
-          }
+# Wait until every atelier port stops LISTENING (or the budget runs out).
+# Without this, restart's next tsx watch hits EADDRINUSE and dies because
+# the OS hasn't recycled the lingering TIME_WAIT/CLOSE_WAIT socket yet.
+function Wait-AtelierPortsReleased([int]$TimeoutMs = 5000) {
+  for ($w = 0; $w -lt [math]::Ceiling($TimeoutMs / 100); $w++) {
+    $stillBound = $false
+    $out = & netstat.exe -ano -p TCP 2>$null
+    foreach ($port in $Ports.Values) {
+      foreach ($line in $out) {
+        if ($line -match ":$port\s+\S+\s+LISTENING\s+\d+") {
+          $stillBound = $true
+          break
         }
-        if ($stillBound) { break }
       }
-      if (-not $stillBound) { $released = $true; break }
-      Start-Sleep -Milliseconds 100
+      if ($stillBound) { break }
     }
-    if (-not $released) {
-      Say "[atelier] warning: ports still bound after 5s, proceeding anyway" "Yellow"
+    if (-not $stillBound) { return $true }
+    Start-Sleep -Milliseconds 100
+  }
+  return $false
+}
+
+function Start-Atelier {
+  param([switch]$AfterStop)
+
+  # 'start' never stops an existing instance. Only 'atelier stop' / 'atelier
+  # restart' may stop Atelier; when something is already bound we refuse and
+  # point at restart instead of silently killing + relaunching.
+  if (-not $AfterStop) {
+    $busy = @($Ports.Values | Where-Object { Test-PortListening $_ 150 })
+    if ($busy.Count -gt 0) {
+      Say "[atelier] already running (port(s): $($busy -join ', ')) - start skipped" "Yellow"
+      Say "[atelier] use 'atelier restart' to restart or 'atelier stop' to stop" "DarkGray"
+      return
     }
   }
+
+  Say "[atelier] starting..."
+  $t0 = [System.Diagnostics.Stopwatch]::StartNew()
 
   $bridgeDir = Join-Path $Root "proserpina-bridge"
   if (Test-Path $bridgeDir) {
@@ -222,7 +229,16 @@ $cmd = if ($Args.Count -gt 0) { $Args[0].ToLower() } else { "start" }
 switch ($cmd) {
   "start"   { Start-Atelier }
   "stop"    { $n = Stop-AtelierPorts; Say "[atelier] stopped $n process(es)" }
-  "restart" { Stop-AtelierPorts; Start-Atelier }
+  "restart" {
+    $n = Stop-AtelierPorts
+    if ($n -gt 0) {
+      Say "[atelier] stopped $n process(es)" "Yellow"
+      if (-not (Wait-AtelierPortsReleased 5000)) {
+        Say "[atelier] warning: ports still bound after 5s, proceeding anyway" "Yellow"
+      }
+    }
+    Start-Atelier -AfterStop
+  }
   "status"  { Show-Status }
   "logs"    { if ($Args.Count -lt 2) { Say "usage: atelier logs <server|frontend|proserpina>" "Yellow" } else { Show-Logs $Args[1] } }
   "deploy"  {
