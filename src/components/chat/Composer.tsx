@@ -25,6 +25,10 @@ type PendingUpload = {
 
 const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 320;
+// Height of the attachment thumbnail strip (h-14 thumb + pt-2). The whole
+// composer grows by this much while images are staged, so the textarea
+// keeps its full share instead of being squeezed into a one-line sliver.
+const ATTACHMENT_STRIP_HEIGHT = 72;
 
 const MENTION_RE = /@([\w\u4e00-\u9fff]+)/g;
 const MENTION_TRIGGER_RE = /@([\w\u4e00-\u9fff]*)$/;
@@ -362,7 +366,7 @@ export function Composer({ agents, roomId, onSend, disabled }: Props) {
 
       <div
         className="px-4 py-3 relative flex flex-col min-h-0"
-        style={{ height }}
+        style={{ height: height + (uploads.length > 0 ? ATTACHMENT_STRIP_HEIGHT : 0) }}
       >
       {hasMentions && (
         <div className="flex items-center gap-1.5 mb-2 flex-wrap shrink-0">
