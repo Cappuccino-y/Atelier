@@ -13,7 +13,7 @@ import { api } from "@/lib/api";
 import { ws } from "@/lib/ws";
 import { atchDebug } from "@/lib/atch-debug";
 import type {
-  Agent, Message, Room, Project, Task, Finding, Event, ServerEvent, ActivityEvent, ActivityKind, MemoryEntry,
+  Agent, Attachment, Message, Room, Project, Task, Finding, Event, ServerEvent, ActivityEvent, ActivityKind, MemoryEntry,
 } from "@/types";
 import { type LiveRun, type RunningRun } from "@/components/chat/RunningDock";
 import type { WsStatus } from "@/lib/ws";
@@ -681,10 +681,10 @@ export default function App() {
     }
   }, []);
 
-  const handleSendMessage = useCallback(async (content: string, mentionedIds: string[]) => {
+  const handleSendMessage = useCallback(async (content: string, mentionedIds: string[], attachments?: Attachment[]) => {
     if (!currentRoomId) return;
     try {
-      await api.sendMessage(currentRoomId, { content, mentionedAgentIds: mentionedIds });
+      await api.sendMessage(currentRoomId, { content, mentionedAgentIds: mentionedIds, attachments });
     } catch (err) {
       atchDebug.error("app", "send message failed", { error: String(err) });
       toast.error("Failed to send message", { detail: String(err) });

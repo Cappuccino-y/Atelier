@@ -52,6 +52,7 @@ db.exec(`
     parent_id TEXT,
     mentioned_agent_ids TEXT NOT NULL DEFAULT '[]',
     reactions TEXT NOT NULL DEFAULT '{}',
+    attachments TEXT NOT NULL DEFAULT '[]',
     timestamp INTEGER NOT NULL
   );
 
@@ -119,6 +120,7 @@ db.exec(`
 // TABLE IF NOT EXISTS won't add them. Try/catch so already-migrated DBs
 // don't blow up on startup.
 try { db.exec("ALTER TABLE messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '{}'"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'"); } catch {}
 try { db.exec("ALTER TABLE rooms ADD COLUMN project_id TEXT"); } catch {}
 
 type CountRow = { count: number };

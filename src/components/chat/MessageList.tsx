@@ -20,24 +20,37 @@ export function MessageList({
   const ref = useRef<VirtuosoHandle>(null);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
   const [atBottom, setAtBottom] = useState(true);
+  // Mirror atBottom into a ref so the growth effect reads the live value.
+  const atBottomRef = useRef(atBottom);
+  atBottomRef.current = atBottom;
+  const prevLenRef = useRef(messages.length);
 
+  // Instant jump. Smooth scrolling over a long virtualized list walks every
+  // intermediate viewport ("pulls and loads" the whole way down) — that is
+  // what made the button feel stuck on long threads.
   const scrollToBottom = () => {
     if (messages.length === 0) return;
     ref.current?.scrollToIndex({
       index: messages.length - 1,
       align: "end",
-      behavior: "smooth",
+      behavior: "auto",
     });
   };
 
   useEffect(() => {
-    if (messages.length > 0) {
-      ref.current?.scrollToIndex({
-        index: messages.length - 1,
-        align: "end",
-        behavior: "smooth",
-      });
-    }
+    const prev = prevLenRef.current;
+    prevLenRef.current = messages.length;
+    if (messages.length === 0) return;
+    // A big jump (initial load / room switch / history growth) always snaps;
+    // a small increment only follows the reader when they're already at the
+    // bottom — never yank someone who scrolled up (that's the button's job).
+    const jumped = prev === 0 || messages.length - prev > 5;
+    if (!jumped && !atBottomRef.current) return;
+    ref.current?.scrollToIndex({
+      index: messages.length - 1,
+      align: "end",
+      behavior: jumped ? "auto" : "smooth",
+    });
   }, [messages.length]);
 
   if (messages.length === 0) {
@@ -88,7 +101,8 @@ return (
         ref={ref}
         data={messages}
         followOutput="smooth"
-        increaseViewportBy={200}
+        increaseViewportBy={600}
+        atBottomThreshold={120}
         atBottomStateChange={setAtBottom}
         itemContent={(index, msg) => {
           const author = agentMap.get(msg.authorId);

@@ -10,6 +10,7 @@ import { ensureOpencodeAgents } from "./opencode-config.js";
 const routeNames = [
   "rooms",
   "messages",
+  "uploads",
   "tasks",
   "agents",
   "events",

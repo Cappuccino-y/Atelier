@@ -20,7 +20,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useState, useCallback, useEffect, memo } from "react";
-import { api } from "@/lib/api";
+import { api, fileUrl } from "@/lib/api";
 import type { Message, Agent, Finding, MessageReactions } from "@/types";
 
 type Props = {
@@ -617,7 +617,7 @@ const markdownComponents = {
     return (
       <span className="inline-block max-w-full my-1">
         <img
-          src={src}
+          src={src ? fileUrl(src) : src}
           alt={alt ?? ""}
           className="max-w-full rounded-lg border border-zinc-200 shadow-sm"
           loading="lazy"
@@ -724,6 +724,7 @@ export const MessageItem = memo(function MessageItem({
     ? { payload: null as Record<string, unknown> | null, remainder: message.content }
     : extractInlineHandoff(message.content);
   const displayContent = extracted.payload ? extracted.remainder : message.content;
+  const attachments = message.attachments ?? [];
 
   // Optimistic finding decisions: applied locally immediately, then replaced
   // by the authoritative message.updated broadcast from the server.
@@ -890,9 +891,31 @@ export const MessageItem = memo(function MessageItem({
                 </ReactMarkdown>
               </div>
 
+              {attachments.length > 0 && (
+                <div className={cn("mt-1.5 flex flex-wrap gap-2", isUser && "justify-end")}>
+                  {attachments.map((att) => (
+                    <a
+                      key={att.id}
+                      href={fileUrl(att.url)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={att.name}
+                      className="block"
+                    >
+                      <img
+                        src={fileUrl(att.url)}
+                        alt={att.name}
+                        loading="lazy"
+                        className="max-h-64 max-w-[260px] rounded-lg border border-zinc-200/80 shadow-sm object-cover"
+                      />
+                    </a>
+                  ))}
+                </div>
+              )}
+
               <div className={cn(
                 "absolute -top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity",
-                isUser ? "-left-7" : "-right-7"
+                isUser ? "-left-7" : "right-2"
               )}>
                 {!isUser && onShowChain && (
                   <button

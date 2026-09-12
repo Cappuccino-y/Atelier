@@ -55,7 +55,7 @@ function RunRow({ run, now, onStop }: {
           "absolute left-0 top-2 bottom-2 w-[3px] rounded-full",
           !stalled && "agent-pulse",
         )}
-        style={{ background: run.agent.color }}
+        style={{ background: run.agent.color, color: run.agent.color }}
         aria-hidden
       />
       <div

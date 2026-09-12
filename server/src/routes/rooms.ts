@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
+import { rmSync } from "node:fs";
 import { db } from "../db.js";
 import { sendAll } from "../broadcast.js";
+import { uploadsDirFor } from "../uploads.js";
 
 export async function routes(app: FastifyInstance) {
   app.get("/api/rooms", async () => {
@@ -60,6 +62,8 @@ export async function routes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>("/api/rooms/:id/clear", async (req, reply) => {
     db.prepare("DELETE FROM messages WHERE room_id = ?").run(req.params.id);
+    // Uploaded images belonged to the deleted messages — drop them too.
+    try { rmSync(uploadsDirFor(req.params.id), { recursive: true, force: true }); } catch {}
     return { ok: true };
   });
 

@@ -1,6 +1,12 @@
-import type { Agent, Message, Room, Task, Project, Event, Finding, MemoryEntry, ActivityEvent } from "@/types";
+import type { Agent, Attachment, Message, Room, Task, Project, Event, Finding, MemoryEntry, ActivityEvent } from "@/types";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || "http://127.0.0.1:8787";
+
+/** Resolve a stored upload path (/uploads/...) to a full URL for <img src>. */
+export function fileUrl(u: string): string {
+  if (!u) return u;
+  return u.startsWith("http") || u.startsWith("data:") || u.startsWith("blob:") ? u : `${API_BASE}${u}`;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, public body: string) {
@@ -37,8 +43,13 @@ export const api = {
     request<Room>(`/api/rooms/${roomId}`, { method: "PATCH", body: JSON.stringify({ projectId }) }),
 
   listMessages: (roomId: string) => request<Message[]>(`/api/rooms/${roomId}/messages`),
-  sendMessage: (roomId: string, body: { content: string; authorId?: string; mentionedAgentIds?: string[] }) =>
+  sendMessage: (roomId: string, body: { content: string; authorId?: string; mentionedAgentIds?: string[]; attachments?: Attachment[] }) =>
     request<Message>(`/api/rooms/${roomId}/messages`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  uploadAttachment: (roomId: string, body: { name: string; mime: string; dataB64: string }) =>
+    request<Attachment>(`/api/rooms/${roomId}/uploads`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

@@ -1,13 +1,26 @@
 import { useState, useRef, useEffect, useMemo, useCallback, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
-import { ArrowUp, Paperclip, GripHorizontal } from "lucide-react";
-import type { Agent } from "@/types";
+import { ArrowUp, Paperclip, GripHorizontal, Loader2, X } from "lucide-react";
+import type { Agent, Attachment } from "@/types";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 
 type Props = {
   agents: Agent[];
-  onSend: (content: string, mentionedIds: string[]) => void;
+  /** Target room for image uploads (required for attachments). */
+  roomId?: string;
+  onSend: (content: string, mentionedIds: string[], attachments: Attachment[]) => void;
   disabled?: boolean;
+};
+
+/** Local state for an image being uploaded from paste/picker. */
+type PendingUpload = {
+  key: string;
+  name: string;
+  /** object URL for the local preview */
+  previewUrl: string;
+  status: "uploading" | "done" | "error";
+  attachment?: Attachment;
 };
 
 const MIN_HEIGHT = 160;
@@ -24,7 +37,7 @@ function formatLastSeen(ts: number): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-export function Composer({ agents, onSend, disabled }: Props) {
+export function Composer({ agents, roomId, onSend, disabled }: Props) {
   const [text, setText] = useState("");
   const [mentionStart, setMentionStart] = useState<number | null>(null);
   const [mentionQuery, setMentionQuery] = useState("");
@@ -35,6 +48,11 @@ export function Composer({ agents, onSend, disabled }: Props) {
   heightRef.current = height;
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  const uploadsRef = useRef(uploads);
+  uploadsRef.current = uploads;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -61,6 +79,80 @@ export function Composer({ agents, onSend, disabled }: Props) {
 
   const handleResetHeight = useCallback(() => {
     setHeight(MIN_HEIGHT);
+  }, []);
+
+  // --- image attachments: paste / picker -> upload -> preview thumbnails ---
+  const updateUpload = useCallback((key: string, patch: Partial<PendingUpload>) => {
+    setUploads((prev) => prev.map((u) => (u.key === key ? { ...u, ...patch } : u)));
+  }, []);
+
+  const removeUpload = useCallback((key: string) => {
+    setUploads((prev) => {
+      const target = prev.find((u) => u.key === key);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((u) => u.key !== key);
+    });
+  }, []);
+
+  const addFiles = useCallback(async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    setUploadError(null);
+    for (const file of images) {
+      const key = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const previewUrl = URL.createObjectURL(file);
+      const name = file.name || "pasted-image.png";
+      setUploads((prev) => [...prev, { key, name, previewUrl, status: "uploading" }]);
+      if (!roomId) {
+        updateUpload(key, { status: "error" });
+        setUploadError("No room selected");
+        continue;
+      }
+      try {
+        const dataB64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result ?? ""));
+          reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+          reader.readAsDataURL(file);
+        });
+        const attachment = await api.uploadAttachment(roomId, {
+          name,
+          mime: file.type || "image/png",
+          dataB64,
+        });
+        updateUpload(key, { status: "done", attachment });
+      } catch (err) {
+        updateUpload(key, { status: "error" });
+        setUploadError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, [roomId, updateUpload]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      // Rich sources (chat apps, docs) put text AND an image on the
+      // clipboard. Only block the default paste when there is no text —
+      // otherwise the text lands in the textarea naturally and the image
+      // is added alongside it.
+      const hasText = (e.clipboardData?.getData("text/plain") ?? "").length > 0;
+      if (!hasText) e.preventDefault();
+      void addFiles(files);
+    }
+  }, [addFiles]);
+
+  // Revoke preview object URLs on unmount.
+  useEffect(() => () => {
+    for (const u of uploadsRef.current) URL.revokeObjectURL(u.previewUrl);
   }, []);
 
   const isCustomHeight = height !== MIN_HEIGHT;
@@ -185,14 +277,26 @@ export function Composer({ agents, onSend, disabled }: Props) {
 
   function handleSend() {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
-    onSend(trimmed, parseMentions(trimmed));
+    const atts = uploads
+      .filter((u) => u.status === "done" && u.attachment)
+      .map((u) => u.attachment!);
+    if (disabled || uploads.some((u) => u.status === "uploading")) return;
+    if (!trimmed && atts.length === 0) return;
+    onSend(trimmed, parseMentions(trimmed), atts);
     setText("");
     setShowDropdown(false);
     setMentionStart(null);
+    setUploads((prev) => {
+      for (const u of prev) URL.revokeObjectURL(u.previewUrl);
+      return [];
+    });
+    setUploadError(null);
   }
 
   const hasText = text.trim().length > 0;
+  const readyCount = uploads.filter((u) => u.status === "done").length;
+  const uploading = uploads.some((u) => u.status === "uploading");
+  const canSend = (hasText || readyCount > 0) && !uploading && !disabled;
   const dropdownActive = showDropdown && candidates.length > 0;
   const hasMentions = mentionedAgents.length > 0;
 
@@ -283,11 +387,42 @@ export function Composer({ agents, onSend, disabled }: Props) {
       )}
 
       <div className="flex flex-col bg-zinc-50/80 border border-zinc-200/80 rounded-xl focus-within:border-indigo-300 focus-within:bg-white focus-within:shadow-sm transition-all flex-1 min-h-0 overflow-hidden">
+        {uploads.length > 0 && (
+          <div className="flex items-center gap-2 px-3 pt-2 flex-wrap shrink-0">
+            {uploads.map((u) => (
+              <div key={u.key} className="relative group/upload">
+                <img
+                  src={u.previewUrl}
+                  alt={u.name}
+                  className={cn(
+                    "h-14 w-14 rounded-lg object-cover border bg-white",
+                    u.status === "error" ? "border-red-300 opacity-60" : "border-zinc-200"
+                  )}
+                />
+                {u.status === "uploading" && (
+                  <span className="absolute inset-0 rounded-lg bg-white/70 flex items-center justify-center">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" />
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => removeUpload(u.key)}
+                  title="Remove image"
+                  className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-zinc-900/80 text-white flex items-center justify-center opacity-0 group-hover/upload:opacity-100 transition-opacity"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </div>
+            ))}
+            {uploadError && <span className="text-[10.5px] text-red-500">{uploadError}</span>}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={text}
           onChange={handleChange}
           onKeyDown={handleKey}
+          onPaste={handlePaste}
           onBlur={() => {
             blurTimeoutRef.current = setTimeout(
               () => setShowDropdown(false),
@@ -308,20 +443,32 @@ export function Composer({ agents, onSend, disabled }: Props) {
             variant="ghost"
             size="icon"
             tabIndex={-1}
-            aria-label="Attach file"
+            aria-label="Attach image"
+            onClick={() => fileInputRef.current?.click()}
             className="h-7 w-7 text-zinc-400 hover:text-zinc-700 rounded-lg shrink-0"
           >
             <Paperclip className="h-3.5 w-3.5" />
           </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              void addFiles(Array.from(e.target.files ?? []));
+              e.target.value = "";
+            }}
+          />
           <div className="flex-1" />
           <Button
             type="button"
             onClick={handleSend}
-            disabled={disabled || !hasText}
+            disabled={!canSend}
             aria-label="Send"
             className={cn(
               "h-9 w-9 rounded-full shrink-0 transition-all duration-150",
-              hasText
+              canSend
                 ? "bg-indigo-600 hover:bg-indigo-700 text-white shadow-[0_4px_14px_-4px_rgba(99,102,241,0.55)] hover:shadow-[0_6px_18px_-4px_rgba(99,102,241,0.7)]"
                 : "bg-zinc-200 text-zinc-400 cursor-not-allowed shadow-none"
             )}

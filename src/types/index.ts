@@ -11,6 +11,16 @@ export type Agent = {
 
 export type MessageReactions = Record<string, { count: number; reactors?: string[] }>;
 
+/** Uploaded image attached to a message (see server/src/uploads.ts). */
+export type Attachment = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** served path, e.g. /uploads/<roomId>/<file> — resolve with fileUrl() */
+  url: string;
+};
+
 export type Message = {
   id: string;
   roomId: string;
@@ -21,6 +31,7 @@ export type Message = {
   parentId?: string | null;
   mentionedAgentIds?: string[];
   reactions?: MessageReactions;
+  attachments?: Attachment[];
   timestamp: number;
 };
 

@@ -166,15 +166,18 @@
   .typing-dot:nth-child(2) { animation-delay: 0.2s; }
   .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-  /* agent active pulse - shows on avatar when thinking */
+  /* agent active pulse - breathing glow in the agent's own color.
+     Callers set `color` to the accent (currentColor); the halo is a blurred
+     shadow that expands on the inhale - strong enough to read at a glance,
+     soft enough not to look like a hard ring. */
   @keyframes agent-pulse {
     0%, 100% {
+      opacity: 0.55;
       box-shadow: 0 0 0 0 currentColor;
-      opacity: 0.6;
     }
     50% {
-      box-shadow: 0 0 0 4px currentColor;
       opacity: 1;
+      box-shadow: 0 0 8px 2px currentColor;
     }
   }
   .agent-pulse {

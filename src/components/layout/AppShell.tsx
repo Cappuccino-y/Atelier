@@ -8,7 +8,7 @@ import { Composer } from "@/components/chat/Composer";
 import { RoomHeader } from "@/components/chat/RoomHeader";
 import { RunningDock, type RunningRun } from "@/components/chat/RunningDock";
 import type {
-  Agent, Message, Room, Project, Task, Event, ActivityEvent, MemoryEntry,
+  Agent, Attachment, Message, Room, Project, Task, Event, ActivityEvent, MemoryEntry,
 } from "@/types";
 import type { WsStatus } from "@/lib/ws";
 
@@ -30,7 +30,7 @@ type Props = {
   showRightPanel: boolean;
   onSelectRoom: (id: string) => void;
   onCreateRoom: () => void;
-  onSendMessage: (content: string, mentionedIds: string[]) => void;
+  onSendMessage: (content: string, mentionedIds: string[], attachments?: Attachment[]) => void;
   onToggleSelfTalk: () => void;
   onReview: () => void;
   onExport: () => void;
@@ -164,7 +164,7 @@ export function AppShell(props: Props) {
                   Failed to load room: {props.roomLoadError}
                 </div>
               )}
-              <Composer agents={props.agents} onSend={props.onSendMessage} />
+              <Composer agents={props.agents} roomId={props.currentRoom?.id} onSend={props.onSendMessage} />
             </div>
           ) : (
             <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">

@@ -10,6 +10,7 @@ import {
 import { parseMemoryEntry, TAG_VOCABULARY } from "./handoff.js";
 import { debugLog } from "./debug.js";
 import { formatSummaryBlock } from "./summarizer.js";
+import { attachmentRelPath } from "../uploads.js";
 
 const HISTORY_LIMIT = 30;
 const OTHER_TRUNCATE = 800;
@@ -103,7 +104,7 @@ export type ChatMessage = {
   content: string;
 };
 
-type Row = { id: string; author_id: string; content: string; timestamp: number; reactions: string; tags: string };
+type Row = { id: string; author_id: string; content: string; timestamp: number; reactions: string; tags: string; attachments: string };
 
 /** Tag matcher derived from the shared vocabulary (suffix-tolerant:
  *  [RESULT], [RESULT:DEPRECATE], [RESULT:xyz] all count as RESULT). */
@@ -199,7 +200,7 @@ export function fetchScopedRows(roomId: string, opts: {
   const filtered = profile.subscribeTags !== "all";
   const PAGE = 120;
   const sql = `
-    SELECT id, author_id, content, timestamp, reactions, tags FROM messages
+    SELECT id, author_id, content, timestamp, reactions, tags, attachments FROM messages
     WHERE room_id = ? ${afterTs != null ? "AND timestamp > ?" : ""}
     ORDER BY timestamp ${order === "asc" ? "ASC" : "DESC"}
     LIMIT ? OFFSET ?
@@ -264,6 +265,19 @@ export function loadRoomThread(roomId: string, agentId: string, profile?: RoleCo
       ? raw
       : extractFinalResult(raw);
     body = body + reactionLine;
+
+    // Surface attached images as cwd-relative paths so multimodal agents can
+    // open them with their read tool (files live in the room's uploads/ dir,
+    // which is exactly the agent run's working directory).
+    if (m.attachments) {
+      try {
+        const atts = JSON.parse(m.attachments) as Array<{ url?: string }>;
+        for (const a of atts) {
+          const rel = a?.url ? attachmentRelPath(a.url) : null;
+          if (rel) body += `\n[attached image: ${rel} — open it with the read tool to see it]`;
+        }
+      } catch { /* malformed attachments — ignore */ }
+    }
 
     const size = stamp.length + body.length;
     if (size > budget) {

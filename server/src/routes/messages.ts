@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 import { db } from "../db.js";
 import { triggerOnMessage, extractMentions, extractTags } from "../agents/triggers.js";
 import { sendAll } from "../broadcast.js";
+import { deleteAttachmentFile, type Attachment } from "../uploads.js";
 
 export async function routes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/api/rooms/:id/messages", async (req) => {
@@ -10,10 +11,26 @@ export async function routes(app: FastifyInstance) {
     return rows.map(normalizeMessage);
   });
 
-  app.post<{ Params: { id: string }; Body: { content: string; authorId?: string; mentionedAgentIds?: string[] } }>("/api/rooms/:id/messages", async (req, reply) => {
-    const { content } = req.body;
+  app.post<{ Params: { id: string }; Body: { content?: string; authorId?: string; mentionedAgentIds?: string[]; attachments?: Array<Partial<Attachment>> } }>("/api/rooms/:id/messages", async (req, reply) => {
+    const content = typeof req.body.content === "string" ? req.body.content : "";
     const authorId = req.body.authorId ?? "user";
-    if (!content || !content.trim()) return reply.code(400).send({ error: "content required" });
+    // Attachments must reference this room's own uploads (no arbitrary URLs).
+    const attachments: Attachment[] = Array.isArray(req.body.attachments)
+      ? req.body.attachments
+          .filter((a): a is Attachment =>
+            Boolean(a && typeof a.url === "string" && a.url.startsWith(`/uploads/${req.params.id}/`)))
+          .slice(0, 6)
+          .map((a) => ({
+            id: String(a.id ?? nanoid()),
+            name: String(a.name ?? "image"),
+            mime: String(a.mime ?? "image/*"),
+            size: Number(a.size) || 0,
+            url: String(a.url),
+          }))
+      : [];
+    if (!content.trim() && attachments.length === 0) {
+      return reply.code(400).send({ error: "content required" });
+    }
 
     const id = nanoid();
     const ts = Date.now();
@@ -24,8 +41,8 @@ export async function routes(app: FastifyInstance) {
       ? req.body.mentionedAgentIds.map((aId) => ({ id: aId, name: aId }))
       : extractMentions(content);
 
-    db.prepare(`INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, req.params.id, authorId, content, JSON.stringify(tags), JSON.stringify(mentions.map(m => m.id)), ts);
+    db.prepare(`INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, attachments, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, req.params.id, authorId, content, JSON.stringify(tags), JSON.stringify(mentions.map(m => m.id)), JSON.stringify(attachments), ts);
 
     db.prepare("UPDATE rooms SET last_activity = ? WHERE id = ?").run(ts, req.params.id);
 
@@ -84,10 +101,15 @@ export async function routes(app: FastifyInstance) {
   app.delete<{ Params: { roomId: string; messageId: string } }>(
     "/api/rooms/:roomId/messages/:messageId",
     async (req, reply) => {
-      const row = db.prepare("SELECT id FROM messages WHERE id = ? AND room_id = ?")
-        .get(req.params.messageId, req.params.roomId) as { id: string } | undefined;
+      const row = db.prepare("SELECT id, attachments FROM messages WHERE id = ? AND room_id = ?")
+        .get(req.params.messageId, req.params.roomId) as { id: string; attachments: string } | undefined;
       if (!row) return reply.code(404).send({ error: "message not found" });
       db.prepare("DELETE FROM messages WHERE id = ?").run(req.params.messageId);
+      // Best-effort: remove uploaded files this message owned.
+      try {
+        const atts = JSON.parse(row.attachments || "[]") as Array<{ url?: string }>;
+        for (const a of atts) if (a?.url) deleteAttachmentFile(req.params.roomId, a.url);
+      } catch { /* ignore malformed attachments */ }
       sendAll("message.deleted", {
         roomId: req.params.roomId,
         messageId: req.params.messageId,
@@ -148,6 +170,7 @@ function normalizeMessage(m: any) {
     parentId: m.parent_id,
     mentionedAgentIds: JSON.parse(m.mentioned_agent_ids || "[]"),
     reactions: JSON.parse(m.reactions || "{}"),
+    attachments: JSON.parse(m.attachments || "[]"),
     timestamp: m.timestamp,
   };
 }
