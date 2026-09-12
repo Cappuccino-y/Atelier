@@ -1,5 +1,6 @@
 import { db } from "../db.js";
 import { sendAll } from "../broadcast.js";
+import { config } from "../config.js";
 import { invokeAgent, persistAgentMemory } from "./runtime.js";
 import {
   parseHandoff,
@@ -19,7 +20,13 @@ import { nanoid } from "nanoid";
 import { debugLog } from "./debug.js";
 
 const MENTION_RE = /(?<![\w.@])@(!?)([\w一-鿿]+)/g;
-const MAX_HANDOFF_DEPTH = 10;
+// Max handoff-chain depth. Reads OPENCODE_HANDOFF_DEPTH (config.opencodeHandoffDepth,
+// default 50) so the documented env var actually controls the guard — it was
+// previously hardcoded to 10, which silently killed legitimate long-running
+// multi-stage project chains (e.g. a 5-phase build relay ≈ 12+ hops).
+const MAX_HANDOFF_DEPTH = Number.isFinite(config.opencodeHandoffDepth) && config.opencodeHandoffDepth > 0
+  ? config.opencodeHandoffDepth
+  : 50;
 const FLOOD_WINDOW = 10;
 const FLOOD_THRESHOLD = 5;
 const MAX_PARALLEL_AGENTS = 4;
@@ -464,7 +471,42 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   debugLog("trigger", params.roomId, params.authorId, "chain depth", { depth, max: MAX_HANDOFF_DEPTH, parentMessageId: params.parentMessageId });
   if (depth > MAX_HANDOFF_DEPTH) {
     debugLog("trigger", params.roomId, params.authorId, "depth cap hit — routing dropped", { depth });
-    sendAll("system.warning", { roomId: params.roomId, reason: "depth-cap", depth });
+    sendAll("system.warning", { roomId: params.roomId, reason: "depth-cap", depth, max: MAX_HANDOFF_DEPTH });
+    // Persist a visible [BLOCKER] so the chain death is recoverable from the
+    // room history — a transient toast alone left users with a silently
+    // dead chain (the Lens→Atlas handoff in "some game" died here at
+    // depth 11/10 and looked like agents just "stopped responding").
+    // Recovery: a fresh user message restarts the parent chain, so a reply
+    // like "@Atlas 继续" naturally resets the depth.
+    try {
+      const blockerId = nanoid();
+      const blockerTs = Date.now();
+      const blockerContent =
+        `[BLOCKER] Handoff 链深度已达上限（${depth} > ${MAX_HANDOFF_DEPTH}），` +
+        `${params.authorId} → [${targets.map((t) => t.id).join(", ")}] 的派活被安全丢弃以防失控循环。\n\n` +
+        `这不是 agent 出错——是防刷深保护生效。链深度从最近一条用户消息起算，` +
+        `长项目（多阶段接力）容易累积到上限。\n\n` +
+        `**恢复方式**：直接发一条新消息（如 "@Atlas 继续"），新用户消息会重置链深度，` +
+        `派活会正常恢复。`;
+      db.prepare(`
+        INSERT INTO messages (id, room_id, author_id, content, tags, findings, parent_id, mentioned_agent_ids, timestamp)
+        VALUES (?, ?, 'system', ?, '["BLOCKER"]', '[]', NULL, '[]', ?)
+      `).run(blockerId, params.roomId, blockerContent, blockerTs);
+      sendAll("message.created", {
+        id: blockerId,
+        roomId: params.roomId,
+        authorId: "system",
+        content: blockerContent,
+        tags: ["BLOCKER"],
+        mentionedAgentIds: [],
+        parentId: null,
+        timestamp: blockerTs,
+      });
+    } catch (err) {
+      debugLog("trigger", params.roomId, params.authorId, "depth-cap blocker insert failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return;
   }
 
