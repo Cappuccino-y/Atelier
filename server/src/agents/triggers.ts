@@ -883,9 +883,69 @@ async function invokeAgentAsync(opts: {
       // failure — skip schema validation entirely so it doesn't trigger an
       // echo fallback (which would make the stop look like a crash).
       if (runFailed) {
-        // opencode 进程失败（超时/退出码非零/无输出）——按 failurePolicy.onTimeout 处理
+        // opencode 进程失败（超时/退出码非零/无输出/API 报错）
         validationFailed = true;
         const policy = failurePolicy.onTimeout ?? "fallback_echo";
+        const errMsg = result.error ?? "timeout";
+
+        // Error classification: TRANSIENT infra failures (rate limit, 5xx,
+        // network, overloaded gateway) are worth a seamless in-place retry
+        // — same agent, same prompt, no echo, no replanning. DETERMINISTIC
+        // failures (invalid request, unsupported input like image-to-text
+        // models, context overflow) would fail identically on retry, so
+        // they skip straight to the configured policy (echo → replanning).
+        const transientErr = /\b(429|500|502|503|504)\b|overloaded|rate.?limit|too many requests|timeout|timed out|econn|socket hang up|fetch failed|bad gateway|service unavailable|internal server error|"type"\s*:\s*"(api_error|overloaded_error|timeout_error|server_error)"/i.test(errMsg);
+
+        if (transientErr && !result.cancelled) {
+          // Seamless infra retry: 1 attempt, dedicated counter (does not
+          // consume the content-retry budget keyed on the same traceId).
+          const infraKey = `${opts.handoff?.traceId ?? opts.roomId}:${opts.agentId}:infra`;
+          const attempt = bumpRetryAttempt(infraKey);
+          const decision = decideRetry({
+            attempt: attempt - 1,
+            maxRetries: 1,
+            elapsedMs: 0,
+            budgetMs: Infinity,
+            reason: `transient infra failure: ${errMsg.slice(0, 160)}`,
+          });
+          if (decision.shouldRetry) {
+            retryScheduled = true;
+            sendAll("system.info", {
+              roomId: opts.roomId,
+              reason: "run-retry-transient",
+              agentId: opts.agentId,
+              runId,
+              retryDelayMs: decision.delayMs,
+              detail: errMsg.slice(0, 200),
+            });
+            const retryTrailer = `[RETRY #${attempt} — 上次运行因瞬时基础设施错误中断（网关/网络）。这是无感重试：原任务不变、原样继续，直接从上次中断处接着做，不要重复已完成的探索。]`;
+            void (async () => {
+              await sleep(decision.delayMs);
+              return invokeAgentAsync({
+                roomId: opts.roomId,
+                agentId: opts.agentId,
+                instance: opts.instance,
+                as: opts.as,
+                prompt: `${opts.prompt}\n\n${retryTrailer}`,
+                parentMessageId: opts.parentMessageId,
+                source: "agent",
+                signal: opts.signal,
+                handoff: opts.handoff,
+              });
+            })().catch((err) => {
+              console.error("[triggers] transient retry failed:", err);
+              sendAll("system.warning", {
+                roomId: opts.roomId,
+                reason: "retry-error",
+                agentId: opts.agentId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+            return; // retry in flight — current (failed) output routes nowhere
+          }
+          // transient retry exhausted → fall through to the configured policy
+        }
+
         if (policy === "fallback_echo" && opts.agentId !== "echo") {
           // 失败兜底派 Echo 接管。但 Echo 自己失败时不能再派 Echo（自杀
           // 循环，见 resume room: Forge exit 1 → Echo exit 1 → 静默死链，

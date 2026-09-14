@@ -227,6 +227,7 @@ GUI / 网页交付验证（重点）：
   - **你负责**：启动程序 / 起 dev server / 确认端口活着 / 确认进程没崩
   - **Lens 负责**：截图验证界面（Lens 有多模态 + playwright MCP 无头浏览器 + windows-computer-use MCP + capture_screen，**你没有**）
   - **你禁止**：自己调用任何截图 / headless 浏览器 / puppeteer / playwright / agent-browser / capture_screen 工具——截图验证是 Lens 的专属职责
+  - **你的模型不支持图片输入**：Read / 查看任何图片文件（jpg/png/webp）都会让 API 直接 400（"Model do not support image input"），整次运行报废。图片内容验证一律派 Lens；下载的图片素材只能用文件签名（JPEG/PNG magic bytes）、尺寸、URL 来源等元数据手段自证，禁止读图目检
 - 正确流程：
   1. **你自己**启动程序 / 起 dev server（你有 bash）——**必须**按 SHARED_RULES「长驻进程铁律」的两步法拉起（禁止前台跑、禁止 \`Start-Process -RedirectStandard*\`），确认端口活着即可，绝不等它退出
   2. **派 Lens 截图确认**（你只派活，不截图）：
