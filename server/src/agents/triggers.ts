@@ -1212,6 +1212,22 @@ async function invokeAgentAsync(opts: {
         }
       }
 
+      // Seamless retry: when a retry is already scheduled (rejected handoff /
+      // schema mismatch / transient infra failure), the FAILED attempt must
+      // leave NO message row — the retried run posts its own output when it
+      // completes, so history only shows the successful attempt. Still emit
+      // agent.completed so the running dock clears this run's row.
+      if (retryScheduled) {
+        sendAll("agent.completed", {
+          roomId: opts.roomId,
+          agentId: opts.agentId,
+          runId,
+          elapsedMs: finishedAt - startedAt,
+          timestamp: finishedAt,
+        });
+        return;
+      }
+
       // If the agent's reply was ONLY a ```handoff``` block (no prose), the
       // stripped display would be blank — which reads as a silent failure.
       // Fall back to a human-readable dispatch summary so the UI shows
