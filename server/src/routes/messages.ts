@@ -4,6 +4,7 @@ import { db } from "../db.js";
 import { triggerOnMessage, extractMentions, extractTags } from "../agents/triggers.js";
 import { sendAll } from "../broadcast.js";
 import { deleteAttachmentFile, type Attachment } from "../uploads.js";
+import { abortRun, listRuns } from "../agents/process-agent.js";
 
 export async function routes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/api/rooms/:id/messages", async (req) => {
@@ -50,11 +51,95 @@ export async function routes(app: FastifyInstance) {
     sendAll("message.created", msg);
 
     // trigger agents async
-    triggerOnMessage({ roomId: req.params.id, authorId, content, parentMessageId: id, source: "user" }).catch(err => {
+    triggerOnMessage({
+      roomId: req.params.id,
+      authorId,
+      content,
+      parentMessageId: id,
+      source: "user",
+      mentionedAgentIds: mentions.map((m) => m.id),
+    }).catch(err => {
       console.error("trigger error", err);
     });
 
     return msg;
+  });
+
+  /**
+   * Interrupt-and-steer: abort every live run in the room, then route the
+   * user's correction + an interrupt report (what was running, for how long,
+   * last command) to the mentioned agent (default: atlas). The aborted runs
+   * settle as cancelled:true — clean, no failure branches.
+   */
+  app.post<{ Params: { id: string }; Body: { content?: string; mentionedAgentIds?: string[] } }>("/api/rooms/:id/interrupt-steer", async (req, reply) => {
+    const roomId = req.params.id;
+    const userText = typeof req.body.content === "string" ? req.body.content.trim() : "";
+    if (!userText) return reply.code(400).send({ error: "content required" });
+
+    // 1. snapshot live runs BEFORE aborting (for the report)
+    const live = listRuns().filter(r => r.roomId === roomId);
+
+    // 2. abort all runs in this room (cancelled:true semantics)
+    let aborted = 0;
+    for (const run of live) {
+      if (abortRun(run.runId)) aborted++;
+    }
+
+    // 3. build the interrupt report
+    const now = Date.now();
+    const reportLines: string[] = [];
+    if (live.length === 0) {
+      reportLines.push("（没有正在运行的 agent——直接处理下面的纠偏指示。）");
+    } else {
+      reportLines.push(`已中断 ${aborted} 个正在运行的任务：`);
+      for (const run of live) {
+        const elapsed = Math.max(1, Math.round((now - run.startedAt) / 1000));
+        const tool = run.lastTool ? `，最后在执行 \`${run.lastTool}\`${run.lastInput ? `: ${run.lastInput}` : ""}` : "，尚未开始工具调用";
+        reportLines.push(`- @${run.agentId} 已运行 ${elapsed}s${tool}`);
+      }
+    }
+    const report = reportLines.join("\n");
+
+    // 4. route to the mentioned agent — explicit mentions win, else atlas
+    const mentions = Array.isArray(req.body.mentionedAgentIds) && req.body.mentionedAgentIds.length > 0
+      ? req.body.mentionedAgentIds.map((aId) => ({ id: aId, name: aId }))
+      : extractMentions(userText);
+    const targetIds = mentions.length > 0 ? mentions.map(m => m.id) : ["atlas"];
+
+    const prompt = [
+      "[用户中断纠偏] 上面的任务已被人工中断，以下是现场状态和新的指示。",
+      "",
+      report,
+      "",
+      "请基于中断前的进度和用户的新指示，重新规划或直接执行。不要重复已完成的步骤。",
+      "",
+      `用户指示：${userText}`,
+    ].join("\n");
+
+    // 5. persist as a user message (visible in the room timeline)
+    const id = nanoid();
+    const ts = Date.now();
+    const content = `⏸ [中断纠偏] ${userText}`;
+    const tags = extractTags(content);
+    db.prepare(`INSERT INTO messages (id, room_id, author_id, content, tags, mentioned_agent_ids, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, roomId, "user", content, JSON.stringify(tags), JSON.stringify(targetIds), ts);
+    db.prepare("UPDATE rooms SET last_activity = ? WHERE id = ?").run(ts, roomId);
+    const msg = normalizeMessage(db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as any);
+    sendAll("message.created", msg);
+
+    // 6. trigger the target agent(s) with the steering prompt
+    for (const t of targetIds) {
+      triggerOnMessage({
+        roomId,
+        authorId: "user",
+        content: prompt,
+        parentMessageId: id,
+        source: "user",
+        mentionedAgentIds: [t],
+      }).catch(err => console.error("interrupt-steer trigger error", err));
+    }
+
+    return { ok: true, aborted, runs: live.map(r => ({ agentId: r.agentId, runId: r.runId })), messageId: id };
   });
 
   app.post<{ Params: { roomId: string; messageId: string }; Body: { emoji: string; userId?: string } }>(

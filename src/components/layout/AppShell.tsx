@@ -30,7 +30,7 @@ type Props = {
   showRightPanel: boolean;
   onSelectRoom: (id: string) => void;
   onCreateRoom: () => void;
-  onSendMessage: (content: string, mentionedIds: string[], attachments?: Attachment[]) => void;
+  onSendMessage: (content: string, mentionedIds: string[], attachments?: Attachment[], interrupt?: boolean) => void;
   onToggleSelfTalk: () => void;
   onReview: () => void;
   onExport: () => void;
@@ -164,7 +164,12 @@ export function AppShell(props: Props) {
                   Failed to load room: {props.roomLoadError}
                 </div>
               )}
-              <Composer agents={props.agents} roomId={props.currentRoom?.id} onSend={props.onSendMessage} />
+              <Composer
+                agents={props.agents}
+                roomId={props.currentRoom?.id}
+                onSend={props.onSendMessage}
+                hasActiveRuns={runningRuns.length > 0}
+              />
             </div>
           ) : (
             <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">

@@ -52,15 +52,30 @@ export function RightPanel({
     document.addEventListener("mouseup", onMouseUp);
   }, []);
 
-  // noise badge on Live tab so you know there's motion even in another tab
-  const liveCount = useMemo(
-    () => activities.filter(a => a.roomId === room.id).length,
-    [activities, room.id]
-  );
+  // badge on Live tab = number of ACTIVE runs (not total activity events —
+  // a busy feed used to show 99+ and squeeze the tab row). Meaningful and small.
+  const liveRuns = useMemo(() => {
+    const done = new Set<string>();
+    const active = new Set<string>();
+    [...activities]
+      .filter(a => a.roomId === room.id)
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .forEach(e => {
+        if (!e.agentId) return;
+        if (e.kind === "agent.thinking" && !e.pending) {
+          active.add(e.agentId);
+          done.delete(e.agentId);
+        } else if ((e.kind === "agent.completed" || e.kind === "agent.error") && e.agentId) {
+          active.delete(e.agentId);
+          done.add(e.agentId);
+        }
+      });
+    return active.size;
+  }, [activities, room.id]);
   const openTasks = tasks.filter(t => t.status !== "done").length;
 
   const tabs: Array<{ id: Tab; label: string; icon: any; badge?: number }> = [
-    { id: "live", label: "Live", icon: Activity, badge: liveCount || undefined },
+    { id: "live", label: "Live", icon: Activity, badge: liveRuns || undefined },
     { id: "tasks", label: "Tasks", icon: KanbanSquare, badge: openTasks || undefined },
     { id: "agents", label: "Agents", icon: Users },
     { id: "memory", label: "Memory", icon: Brain },
@@ -80,7 +95,7 @@ export function RightPanel({
 
       <div className="flex flex-col flex-1 min-w-0">
         <div className="border-b border-zinc-200/80 bg-white px-2 pt-2 shrink-0">
-          <div className="flex items-center gap-0 overflow-x-auto">
+          <div className="flex items-center gap-0 overflow-hidden">
             {tabs.map(t => {
               const Icon = t.icon;
               const active = tab === t.id;
@@ -89,15 +104,15 @@ export function RightPanel({
                   key={t.id}
                   onClick={() => setTab(t.id)}
                   className={cn(
-                    "relative flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium rounded-t-md transition-colors shrink-0",
-                    active ? "text-zinc-900" : "text-zinc-500 hover:text-zinc-700"
+                    "relative flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium rounded-t-md transition-colors min-w-0 shrink",
+                  active ? "text-zinc-900" : "text-zinc-500 hover:text-zinc-700"
                   )}
                 >
-                  <Icon className="h-3 w-3" />
-                  <span>{t.label}</span>
+                  <Icon className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{t.label}</span>
                   {!active && t.badge != null && (
-                    <span className="ml-0.5 min-w-[14px] px-1 h-[14px] rounded-full bg-zinc-100 text-zinc-500 text-[9px] font-semibold leading-[14px] text-center">
-                      {t.badge > 99 ? "99+" : t.badge}
+                    <span className="ml-0.5 min-w-[14px] px-1 h-[14px] rounded-full bg-indigo-100 text-indigo-600 text-[9px] font-semibold leading-[14px] text-center shrink-0">
+                      {t.badge > 9 ? "9+" : t.badge}
                     </span>
                   )}
                   {active && <span className="absolute left-0 right-0 -bottom-px h-0.5 bg-indigo-500" />}
@@ -358,6 +373,7 @@ function ToolRunRow({ events, agent }: { events: ActivityEvent[]; agent?: Agent 
   const [open, setOpen] = useState(false);
   const name = agent?.name ?? "Agent";
   const tool = String(events[0].meta?.tool ?? "tool");
+  const inputSummary = typeof events[0].meta?.input === "string" ? (events[0].meta!.input as string) : undefined;
   return (
     <div className="relative">
       <button
@@ -379,6 +395,11 @@ function ToolRunRow({ events, agent }: { events: ActivityEvent[]; agent?: Agent 
         <div className="min-w-0 flex-1 flex items-baseline justify-between gap-2">
           <span className="text-[12px] leading-snug font-medium text-zinc-700 truncate">
             {name} → <code className="font-mono text-[11px]">{tool}</code>
+            {inputSummary && (
+              <code className="ml-1.5 font-mono text-[10.5px] text-indigo-600" title={inputSummary}>
+                {inputSummary.length > 60 ? `${inputSummary.slice(0, 60)}…` : inputSummary}
+              </code>
+            )}
             <span className="ml-1.5 text-[10px] font-semibold text-zinc-400">×{events.length}</span>
           </span>
           <span className="text-[10px] text-zinc-400 shrink-0 tabular-nums">{formatRelativeTime(events[0].timestamp)}</span>

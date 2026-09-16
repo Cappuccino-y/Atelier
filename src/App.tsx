@@ -38,6 +38,39 @@ function asActivityKind(s: string): ActivityKind | null {
   return (ACTIVITY_KINDS as string[]).includes(s) ? (s as ActivityKind) : null;
 }
 
+/**
+ * Human-readable one-line summary of a tool call's input, for the running
+ * dock / live panel ("which command is this agent running right now?").
+ */
+function summarizeToolInput(tool: string, input: unknown): string | null {
+  if (input == null || typeof input !== "object") return null;
+  const o = input as Record<string, unknown>;
+  const firstStr = (...keys: string[]): string | null => {
+    for (const k of keys) {
+      const v = o[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return null;
+  };
+  switch (tool) {
+    case "bash":
+      return firstStr("command", "cmd", "script");
+    case "read":
+    case "write":
+    case "edit":
+      return firstStr("filePath", "file_path", "path", "notebook_path");
+    case "glob":
+      return firstStr("pattern");
+    case "grep":
+      return firstStr("pattern", "query");
+    case "task":
+    case "todowrite":
+      return null; // too noisy to summarize
+    default:
+      return firstStr("command", "query", "url", "path", "pattern", "description", "prompt");
+  }
+}
+
 export default function App() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -51,6 +84,9 @@ export default function App() {
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
   const [streamingText, setStreamingText] = useState<Record<string, string>>({});
   const [streamingTool, setStreamingTool] = useState<Record<string, string>>({});
+  // tool input summary per run-key (e.g. bash command text) — shown alongside
+  // the tool chip in the running dock / live panel
+  const [streamingToolInput, setStreamingToolInput] = useState<Record<string, string>>({});
   // Live runs keyed by runId (fallback `${roomId}:${agentId}`). runId-granular
   // so parallel same-role instances (to:["forge","forge"]) render as separate
   // rows in the running dock.
@@ -63,12 +99,14 @@ export default function App() {
   // subscription effect below never re-binds on streaming re-renders.
   const streamBufferRef = useRef<Record<string, string>>({});
   const streamToolRef = useRef<Record<string, string | null>>({});
+  const streamToolInputRef = useRef<Record<string, string | null>>({});
   const rafIdRef = useRef<number | null>(null);
   const flushStream = useCallback(() => {
     rafIdRef.current = null;
     const txt = streamBufferRef.current;
     const tl = streamToolRef.current;
-    if (Object.keys(txt).length === 0 && Object.keys(tl).length === 0) return;
+    const ti = streamToolInputRef.current;
+    if (Object.keys(txt).length === 0 && Object.keys(tl).length === 0 && Object.keys(ti).length === 0) return;
     setStreamingText(prev => {
       const next = { ...prev };
       for (const [k, v] of Object.entries(txt)) {
@@ -84,8 +122,17 @@ export default function App() {
       }
       return next;
     });
+    setStreamingToolInput(prev => {
+      const next = { ...prev };
+      for (const [k, v] of Object.entries(ti)) {
+        if (v === null) delete next[k];
+        else next[k] = v;
+      }
+      return next;
+    });
     streamBufferRef.current = {};
     streamToolRef.current = {};
+    streamToolInputRef.current = {};
   }, []);
   const scheduleFlush = useCallback(() => {
     if (rafIdRef.current !== null) return;
@@ -129,12 +176,13 @@ export default function App() {
           lastEventAt: r.lastEventAt,
           runId: r.runId,
           tool: streamingTool[sKey] ?? r.lastTool,
+          toolInput: streamingToolInput[sKey],
           textTail: streamingText[sKey]?.slice(-180),
           instanceLabel: perAgent[r.agentId] > 1 ? `#${perAgent[r.agentId]}` : undefined,
         } as RunningRun;
       })
       .filter((r): r is RunningRun => r !== null);
-  }, [liveRuns, currentRoomId, agentMap, streamingTool, streamingText]);
+  }, [liveRuns, currentRoomId, agentMap, streamingTool, streamingToolInput, streamingText]);
 
   // stable ref for activity appender (avoid re-binding ws handler)
   const pushActivity = useRef((ev: Omit<ActivityEvent, "id" | "timestamp">) => {
@@ -479,16 +527,16 @@ export default function App() {
           break;
         }
         case "agent.tool_call": {
-          const p = payload as { roomId: string; agentId: string; runId?: string; tool: string };
+          const p = payload as { roomId: string; agentId: string; runId?: string; tool: string; input?: unknown };
+          const inputSummary = summarizeToolInput(p.tool, p.input);
           if (p.roomId === currentRoomId && p.agentId) {
             // per-RUN key: parallel same-role instances (forge/forge#2) each
             // get their own tool chip + streaming tail in the running dock
             const tKey = p.runId ? `${p.roomId}:${p.runId}` : `${p.roomId}:${p.agentId}`;
             streamToolRef.current[tKey] = p.tool;
+            streamToolInputRef.current[tKey] = inputSummary;
             scheduleFlush();
           }
-          // heartbeats bump every open run of this agent (runId is not on
-          // tool_call payloads, so attribute to all of the agent's runs)
           const now = Date.now();
           setLiveRuns(prev => {
             let changed = false;
@@ -507,7 +555,7 @@ export default function App() {
             kind: "agent.tool_call",
             agentId: p.agentId,
             message: p.tool,
-            meta: { tool: p.tool },
+            meta: { tool: p.tool, input: inputSummary ?? undefined },
           });
           break;
         }
@@ -681,10 +729,16 @@ export default function App() {
     }
   }, []);
 
-  const handleSendMessage = useCallback(async (content: string, mentionedIds: string[], attachments?: Attachment[]) => {
+  const handleSendMessage = useCallback(async (content: string, mentionedIds: string[], attachments?: Attachment[], interrupt?: boolean) => {
     if (!currentRoomId) return;
     try {
-      await api.sendMessage(currentRoomId, { content, mentionedAgentIds: mentionedIds, attachments });
+      if (interrupt) {
+        // Interrupt-and-steer: server aborts live runs, attaches an interrupt
+        // report, and routes the correction (default target: atlas)
+        await api.interruptSteer(currentRoomId, { content, mentionedAgentIds: mentionedIds });
+      } else {
+        await api.sendMessage(currentRoomId, { content, mentionedAgentIds: mentionedIds, attachments });
+      }
     } catch (err) {
       atchDebug.error("app", "send message failed", { error: String(err) });
       toast.error("Failed to send message", { detail: String(err) });

@@ -150,6 +150,14 @@ export const api = {
       "/api/runtime/runs"
     ),
 
+  /** Interrupt-and-steer: abort all live runs in the room, then route the
+   *  user's correction + an interrupt report to the mentioned agent. */
+  interruptSteer: (roomId: string, body: { content: string; mentionedAgentIds?: string[] }) =>
+    request<{ ok: true; aborted: number; messageId: string }>(`/api/rooms/${roomId}/interrupt-steer`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   deleteMessage: (roomId: string, messageId: string) =>
     request<{ ok: true }>(`/api/rooms/${roomId}/messages/${messageId}`, { method: "DELETE" }),
 

@@ -1,14 +1,29 @@
-import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+/**
+ * Agent execution layer — opencode server/SDK runtime.
+ *
+ * Replaces the legacy one-shot `opencode run` subprocess approach. We now
+ * talk to a shared, long-lived `opencode serve` process over HTTP + SSE:
+ *
+ *   - no stdout pipe parsing (the whole #44601 EOF-vs-exit bug family dies)
+ *   - `session.abort()` instead of taskkill trees (clean cancel semantics)
+ *   - tool events carry their input natively (bash command visibility)
+ *   - sessions persist server-side (context survives across prompts)
+ *
+ * The public surface (runOpenCodeAgent / AgentEvent / AgentRunOptions /
+ * AgentRunResult / abortRun / listRuns ...) is unchanged — callers in
+ * runtime.ts, summarizer.ts, triggers.ts and routes/* need no edits.
+ */
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { config } from "../config.js";
 import { debugLog } from "./debug.js";
 
 export type AgentEvent =
   | { type: "step_start"; step: string }
   | { type: "text_delta"; delta: string }
-  | { type: "tool_use"; tool: string; input?: unknown; output?: unknown }
+  | { type: "tool_use"; tool: string; input?: unknown; output?: unknown; silent?: boolean }
   | { type: "step_finish"; reason: string }
   | { type: "error"; message: string };
 
@@ -64,7 +79,7 @@ export async function runOpenCodeAgent(opts: AgentRunOptions): Promise<AgentRunR
     }
     return mockResponse(opts);
   }
-  return runRealAgent(opts);
+  return runServerAgent(opts);
 }
 
 function mockResponse(opts: AgentRunOptions): AgentRunResult {
@@ -75,305 +90,469 @@ function mockResponse(opts: AgentRunOptions): AgentRunResult {
   };
 }
 
-function runRealAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
-  return new Promise((resolve) => {
-    const tmpDir = mkdtempSync(join(tmpdir(), "atelier-"));
-    const promptFile = join(tmpDir, "prompt.txt");
-    const batFile = join(tmpDir, "run.bat");
-    writeFileSync(promptFile, opts.prompt, "utf8");
+/* ------------------------------------------------------------------ */
+/* Shared opencode server (lazy singleton)                             */
+/* ------------------------------------------------------------------ */
 
-    const model = opts.model ?? config.opencodeModel;
-    // Pin every agent run to <workspace>/rooms/<roomId>/ — generated files
-    // and projects stay out of the repo tree, and concurrent rooms get
-    // isolated working directories. Falls back to the repo root for runs
-    // without a room (shouldn't happen in practice).
-    let cwd: string;
-    if (opts.roomId) {
-      cwd = join(config.agentWorkspace, "rooms", opts.roomId);
-      try { mkdirSync(cwd, { recursive: true }); } catch {}
-    } else {
-      cwd = opts.cwd ?? process.cwd();
-    }
-    const timeoutMs = opts.timeoutMs ?? config.opencodeTimeout;
+let serverProc: ChildProcess | null = null;
+let serverClient: OpencodeClient | null = null;
+let serverUrl: string | null = null;
+let serverStarting: Promise<OpencodeClient> | null = null;
 
-    const batContent = `@echo off
-chcp 65001 >nul
-type "${promptFile}" | opencode run - --agent "${opts.opencodeAgent}" --model "${model}" --dir "${cwd}" --format json
-`;
-    writeFileSync(batFile, batContent, "utf8");
+/**
+ * Spawn `opencode serve` once and reuse it for every agent run. The server
+ * inherits our environment (provider keys, user-level opencode.json with the
+ * 9-agent definitions + permission matrix), so agent configs behave exactly
+ * like they did under `opencode run`.
+ */
+async function getOpencodeClient(): Promise<OpencodeClient> {
+  if (serverClient) return serverClient;
+  if (serverStarting) return serverStarting;
 
-    debugLog("opencode-cmd", undefined, opts.agentName, "spawning opencode", {
-      opencodeAgent: opts.opencodeAgent,
-      model,
-      cwd,
-      timeoutMs,
-      cmd: batContent.trim().split("\n").pop(),
-      runId: opts.runId,
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let killed = false;
-    let aborted = false;
-
-    const child: ChildProcess = spawn("cmd.exe", ["/d", "/s", "/c", batFile], {
+  serverStarting = (async () => {
+    const proc = spawn("opencode", ["serve", "--hostname=127.0.0.1"], {
       windowsHide: true,
-      cwd,
       env: { ...process.env },
     });
-    if (opts.runId) {
-      const runId = opts.runId;
-      // returns the registry's AbortController — aborting it resolves the run
-      // as cancelled:true (user interrupt), never as a generic failure
-      const controller = registerRun(runId, child, { roomId: opts.roomId, agentId: opts.agentName });
-      const keys: string[] = [opts.agentName];
-      if (opts.roomId) keys.unshift(`${opts.roomId}:${opts.agentName}`);
-      registerRunAliases(runId, keys);
-      child.once("close", () => unregisterRunAliases(runId, keys));
-      const onAbort = () => {
-        aborted = true;
-        killTree(child);
+    const output = { text: "" };
+    const url = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`opencode serve startup timeout (60s): ${output.text.slice(0, 400)}`)), 60_000);
+      const onData = (chunk: unknown) => {
+        output.text += String(chunk);
+        const m = output.text.match(/opencode server listening on (https?:\/\/\S+)/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[1]);
+        }
       };
-      if (controller.signal.aborted) onAbort();
-      else controller.signal.addEventListener("abort", onAbort, { once: true });
-    }
-
-    const timer = setTimeout(() => {
-      killed = true;
-      killTree(child);
-      // Kill-tree backstop: if taskkill /T fails (zombie, permissions), the
-      // child's 'close' never fires and the promise would hang forever,
-      // leaking the (room, agent) slot and queueing every later task for
-      // this agent. Resolve with a timeout error regardless.
-      killBackstopTimer = setTimeout(() => {
-        if (!closed) {
-          debugLog("opencode-backstop", opts.roomId, opts.agentName, "kill-tree backstop fired — forcing resolve", {
-            runId: opts.runId,
-          });
-          closed = true;
-          try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-          const partial = parseOpenCodeOutput(stdout);
-          resolve({
-            content: partial.content,
-            success: false,
-            error: `timeout after ${timeoutMs}ms (process could not be terminated cleanly)`,
-            rawEvents: partial.rawEvents,
-          });
-        }
-      }, 10_000);
-      killBackstopTimer.unref?.();
-    }, timeoutMs);
-
-    // external abort (caller-provided signal)
-    const onExternalAbort = () => {
-      aborted = true;
-      killTree(child);
-    };
-    if (opts.signal) {
-      if (opts.signal.aborted) onExternalAbort();
-      else opts.signal.addEventListener("abort", onExternalAbort, { once: true });
-    }
-
-    let closed = false;
-    let killBackstopTimer: NodeJS.Timeout | undefined;
-    const settleClose = () => {
-      if (killBackstopTimer) clearTimeout(killBackstopTimer);
-      closed = true;
-      if (opts.signal) opts.signal.removeEventListener("abort", onExternalAbort);
-      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    };
-
-    const emit = opts.onEvent;
-
-    // brace-balanced JSON parser: opencode emits concatenated JSON objects whose
-    // string values (text deltas, tool state.output) often contain literal
-    // newlines. A naive split-by-line approach shreds those objects and falls
-    // back to emitting raw JSON fragments as text_delta, polluting the agent's
-    // message body. Walk the buffer tracking `{}` depth + string/escape state
-    // so embedded newlines don't break us.
-    let jsonBuf = "";
-    const handleObj = (obj: any) => {
-      const o = obj as {
-        type?: string;
-        part?: { type?: string; text?: string; tool?: string; state?: { input?: unknown; output?: unknown; title?: string } };
-        error?: { message?: string } | string;
-      };
-      const partType = o.part?.type;
-      if (o.type === "step_start") {
-        emit?.({ type: "step_start", step: partType ?? "step" });
-      } else if (o.type === "text" && typeof o.part?.text === "string") {
-        emit?.({ type: "text_delta", delta: o.part.text });
-      } else if (o.type === "tool_use" || partType === "tool") {
-        emit?.({
-          type: "tool_use",
-          tool: o.part?.tool ?? "tool",
-          input: o.part?.state?.input,
-          output: o.part?.state?.output,
-        });
-      } else if (o.type === "step_finish") {
-        const reason = (o.part as { reason?: string })?.reason ?? "stop";
-        emit?.({ type: "step_finish", reason });
-      } else if (o.type === "error") {
-        const msg = extractErrorMsg(o.error) || "opencode error";
-        emit?.({ type: "error", message: msg });
-      }
-    };
-
-    if (child.stdout) {
-      child.stdout.on("data", (d) => {
-        const chunk = d.toString();
-        stdout += chunk;
-        jsonBuf += chunk;
-        // drain all complete objects currently in the buffer
-        let progress = true;
-        while (progress) {
-          const { consumed, objects } = consumeJsonObjects(jsonBuf);
-          for (const obj of objects) handleObj(obj);
-          jsonBuf = jsonBuf.slice(consumed);
-          progress = objects.length > 0;
-        }
+      proc.stdout?.on("data", onData);
+      proc.stderr?.on("data", onData);
+      proc.once("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`opencode serve exited early (code ${code}): ${output.text.slice(0, 400)}`));
       });
-    }
-
-    if (child.stderr) {
-      child.stderr.on("data", (d) => {
-        const chunk = d.toString();
-        stderr += chunk;
-        for (const line of chunk.split(/\r?\n/)) {
-          const trimmed = line.trim();
-          if (trimmed) emit?.({ type: "error", message: trimmed });
-        }
-      });
-    }
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      settleClose();
-
-      // flush any leftover JSON objects in the buffer
-      {
-        const { objects } = consumeJsonObjects(jsonBuf);
-        for (const obj of objects) handleObj(obj);
-        jsonBuf = "";
-      }
-
-      if (aborted) {
-        // The agent was stopped (Stop button). Content should be the
-        // streamed text so far, NOT the raw JSON event stream — dumping
-        // stdout here pollutes the message with `{"type":"step_start",...}`
-        // JSON and makes the reply look like a crash. Parse it like a
-        // normal completion, then mark it cancelled.
-        const partial = parseOpenCodeOutput(stdout);
-        debugLog("opencode-close", undefined, opts.agentName, "aborted by user", {
-          code,
-          runId: opts.runId,
-          stdoutBytes: stdout.length,
-          stderrBytes: stderr.length,
-        });
-        resolve({
-          content: partial.content,
-          success: false,
-          error: "aborted by user",
-          cancelled: true,
-          rawEvents: partial.rawEvents,
-        });
-        return;
-      }
-      if (killed) {
-        // Same reasoning as abort: surface the streamed text, not raw JSON.
-        const partial = parseOpenCodeOutput(stdout);
-        debugLog("opencode-close", undefined, opts.agentName, "timeout kill", {
-          code,
-          runId: opts.runId,
-          timeoutMs,
-          stdoutBytes: stdout.length,
-        });
-        resolve({
-          content: partial.content,
-          success: false,
-          error: `timeout after ${timeoutMs}ms`,
-          rawEvents: partial.rawEvents,
-        });
-        return;
-      }
-
-      const parsed = parseOpenCodeOutput(stdout);
-      debugLog("opencode-close", undefined, opts.agentName, "process closed", {
-        code,
-        runId: opts.runId,
-        success: parsed.success,
-        stdoutBytes: stdout.length,
-        stderrBytes: stderr.length,
-        stderrHead: stderr.slice(0, 500),
-        contentLen: parsed.content.length,
-      });
-      if (parsed.success) {
-        resolve(parsed);
-      } else if (code === 0 && parsed.content.length === 0 && !parsed.error) {
-        // Exit 0 + zero content: the model returned nothing (empty completion,
-        // upstream API hiccup). "exit code 0" is a lie here — say what happened.
-        resolve({
-          content: "",
-          success: false,
-          error: `model returned no output (opencode exited 0, ${stdout.length} bytes stdout, ${stderr.length} bytes stderr)`,
-        });
-      } else {
-        resolve({
-          content: parsed.content || stderr || "(no output)",
-          success: false,
-          error: parsed.error || `exit code ${code}`,
-        });
-      }
     });
 
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      settleClose();
-      resolve({ content: "", success: false, error: err.message });
+    proc.once("exit", (code) => {
+      debugLog("opencode-server", undefined, undefined, "shared server exited", { code, url });
+      serverProc = null;
+      serverClient = null;
+      serverUrl = null;
+      serverStarting = null;
+      // next run re-spawns lazily via getOpencodeClient()
     });
-  });
+
+    serverProc = proc;
+    serverUrl = url;
+    serverClient = createOpencodeClient({ baseUrl: url });
+    debugLog("opencode-server", undefined, undefined, "shared server started", { url, pid: proc.pid });
+    return serverClient;
+  })();
+
+  return serverStarting;
 }
 
-export function parseOpenCodeOutput(stdout: string): AgentRunResult {
-  const { objects: events } = consumeJsonObjects(stdout);
+/** Best-effort shutdown (used by tests / graceful restart). */
+export function stopSharedServer(): void {
+  if (serverProc) {
+    try { serverProc.kill(); } catch { /* ignore */ }
+    serverProc = null;
+    serverClient = null;
+    serverUrl = null;
+    serverStarting = null;
+  }
+}
+
+/** Debug accessor: current shared server URL (null when not running). */
+export function getServerUrlForDebug(): string | null {
+  return serverUrl;
+}
+
+/* ------------------------------------------------------------------ */
+/* Run registry (sessions instead of child processes)                  */
+/* ------------------------------------------------------------------ */
+
+/** runId → live session id, for abort/kill lookups. */
+const activeSessions = new Map<string, string>();
+/** roomKey (`roomId:agentId` or bare `agentId`) → runId, for stop-by-room-agent */
+const activeByRoomAgent = new Map<string, string>();
+/** runId → abort state (user interrupt vs timeout vs natural end) */
+const activeAbort = new Map<string, { aborted: boolean; timedOut: boolean }>();
+/** runId → run metadata for the /api/runtime/runs liveness endpoint. */
+const activeMeta = new Map<
+  string,
+  { roomId?: string; agentId?: string; startedAt: number; lastTool?: string; lastInput?: string }
+>();
+
+function cleanupRun(runId: string, keys: string[]): void {
+  activeSessions.delete(runId);
+  activeAbort.delete(runId);
+  activeMeta.delete(runId);
+  for (const k of keys) {
+    if (activeByRoomAgent.get(k) === runId) activeByRoomAgent.delete(k);
+  }
+}
+
+/** Snapshot of currently-live runs for the liveness endpoint. */
+export function listRuns(): Array<{
+  runId: string; roomId?: string; agentId?: string; startedAt: number; lastTool?: string; lastInput?: string;
+}> {
+  const out: Array<{
+    runId: string; roomId?: string; agentId?: string; startedAt: number; lastTool?: string; lastInput?: string;
+  }> = [];
+  for (const [runId, meta] of activeMeta) {
+    if (!activeSessions.has(runId)) continue; // cleanup pending — treat as dead
+    out.push({
+      runId,
+      roomId: meta.roomId,
+      agentId: meta.agentId,
+      startedAt: meta.startedAt,
+      lastTool: meta.lastTool,
+      lastInput: meta.lastInput,
+    });
+  }
+  return out;
+}
+
+/** Update a run's last-seen tool + input summary (drives interrupt reports). */
+export function noteRunTool(runId: string, tool: string, inputSummary?: string): void {
+  const meta = activeMeta.get(runId);
+  if (!meta) return;
+  meta.lastTool = tool;
+  if (inputSummary) meta.lastInput = inputSummary;
+}
+
+/** Compact one-line summary of a tool call input (server-side mirror of the
+ *  frontend's summarizeToolInput — used for interrupt reports). */
+export function summarizeToolInput(tool: string, input: unknown): string | undefined {
+  if (input == null || typeof input !== "object") return undefined;
+  const o = input as Record<string, unknown>;
+  const firstStr = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = o[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return undefined;
+  };
+  let s: string | undefined;
+  switch (tool) {
+    case "bash": s = firstStr("command", "cmd", "script"); break;
+    case "read":
+    case "write":
+    case "edit": s = firstStr("filePath", "file_path", "path", "notebook_path"); break;
+    case "glob": s = firstStr("pattern"); break;
+    case "grep": s = firstStr("pattern", "query"); break;
+    default: s = firstStr("command", "query", "url", "path", "pattern", "description", "prompt");
+  }
+  if (!s) return undefined;
+  return s.length > 120 ? `${s.slice(0, 120)}…` : s;
+}
+
+/** Abort a run — asks the opencode server to abort the session. The run
+ *  resolves as cancelled:true (a deliberate user interrupt, NOT a failure). */
+export function abortRun(runId: string): boolean {
+  const sessionId = activeSessions.get(runId);
+  if (!sessionId) return false;
+  const state = activeAbort.get(runId);
+  if (state) state.aborted = true;
+  // fire-and-forget: the SSE stream sees the abort and the run settles
+  void (async () => {
+    try {
+      const client = await getOpencodeClient();
+      await client.session.abort({ path: { id: sessionId } });
+      debugLog("opencode-abort", undefined, undefined, "session.abort sent", { runId, sessionId });
+    } catch (err) {
+      debugLog("opencode-abort", undefined, undefined, "session.abort failed", {
+        runId, sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // server unreachable → force-settle via timeout path is not possible
+      // here; the run's own timeout backstop will fire if truly hung.
+    }
+  })();
+  return true;
+}
+
+/** Abort by room/agent key (or any alias) — resolves to a runId first. */
+export function abortRunByKey(key: string): boolean {
+  const runId = activeByRoomAgent.get(key);
+  if (!runId) return false;
+  return abortRun(runId);
+}
+
+/** Hard kill — for the SDK runtime this degrades to abort (there is no
+ *  process tree to taskkill; the server owns the session). */
+export function killRun(runId: string): boolean {
+  return abortRun(runId);
+}
+
+/** Kill by room/agent key (or any alias) — resolves to a runId first. */
+export function killRunByKey(key: string): boolean {
+  return abortRunByKey(key);
+}
+
+/* ------------------------------------------------------------------ */
+/* Model parsing                                                       */
+/* ------------------------------------------------------------------ */
+
+/** Split "provider/model" (e.g. "custom-saas/glm-5.3-flash-saas"). When no
+ *  slash is present the model is left unpinned — the server falls back to the
+ *  user-level opencode.json default model. */
+function splitModel(model?: string): { providerID?: string; modelID?: string } {
+  if (!model) return {};
+  const idx = model.indexOf("/");
+  if (idx <= 0 || idx === model.length - 1) return { modelID: model };
+  return { providerID: model.slice(0, idx), modelID: model.slice(idx + 1) };
+}
+
+/* ------------------------------------------------------------------ */
+/* The real agent run (server/SDK)                                     */
+/* ------------------------------------------------------------------ */
+
+async function runServerAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
+  const client = await getOpencodeClient();
+
+  // Pin every agent run to <workspace>/rooms/<roomId>/ — generated files and
+  // projects stay out of the repo tree, and concurrent rooms get isolated
+  // working directories. Falls back to the repo root for runs without a room.
+  let cwd: string;
+  if (opts.roomId) {
+    cwd = join(config.agentWorkspace, "rooms", opts.roomId);
+    try { mkdirSync(cwd, { recursive: true }); } catch {}
+  } else {
+    cwd = opts.cwd ?? process.cwd();
+  }
+  const timeoutMs = opts.timeoutMs ?? config.opencodeTimeout;
+  const model = splitModel(opts.model ?? config.opencodeModel);
+  const runId = opts.runId ?? `run_${Date.now().toString(36)}`;
+  const emit = opts.onEvent;
+
+  debugLog("opencode-cmd", opts.roomId, opts.agentName, "creating session", {
+    opencodeAgent: opts.opencodeAgent,
+    model: opts.model ?? config.opencodeModel,
+    cwd,
+    timeoutMs,
+    runId,
+  });
+
+  // 1. create session pinned to the room workspace
+  const session = await client.session.create({ query: { directory: cwd } });
+  const sessionId = session.data!.id;
+
+  // 2. register in the run registry (abort + liveness + aliases)
+  const abortState = { aborted: false, timedOut: false };
+  activeSessions.set(runId, sessionId);
+  activeAbort.set(runId, abortState);
+  activeMeta.set(runId, { roomId: opts.roomId, agentId: opts.agentName, startedAt: Date.now() });
+  const keys = [opts.agentName];
+  if (opts.roomId) keys.unshift(`${opts.roomId}:${opts.agentName}`);
+  for (const k of keys) activeByRoomAgent.set(k, runId);
+
+  // 3. subscribe to the SSE stream and filter events for this session.
+  //    One stream per run keeps cleanup simple (close when the run ends);
+  //    opencode handles many concurrent SSE clients without issue.
+  //    NOTE: /global/event (project-agnostic bus) is the one that carries
+  //    message/session traffic for sessions in arbitrary room directories —
+  //    the directory-scoped /event stream only emits server-level frames.
+  const stream = await client.global.event();
+  const streamOk = !!stream.stream;
+  if (!streamOk) {
+    cleanupRun(runId, keys);
+    return { content: "", success: false, error: "opencode event stream unavailable" };
+  }
+
   const textParts: string[] = [];
   const errors: string[] = [];
+  let sawAssistantError = false;
+  let settled = false;
+  // per-run stream dedupe state (hoisted above the SSE consumer)
+  const toolSeen = new Set<string>();
+  const toolOutputs = new Map<string, unknown>();
+  /** partID → part type, so reasoning deltas can be excluded from content */
+  const ssePartTypes = new Map<string, string>();
 
-  for (const obj of events as Array<{
-    type?: unknown;
-    text?: unknown;
-    part?: { type?: unknown; text?: unknown };
-    error?: { message?: string } | string;
-  }>) {
-    // opencode json format: { "type":"text", "part": { "type":"text", "text":"..." } }
-    const partText = obj.part?.text;
-    if (obj.type === "text" && typeof partText === "string") {
-      textParts.push(partText);
-    } else if (obj.type === "text" && typeof obj.text === "string") {
-      // fallback for older formats
-      textParts.push(obj.text);
-    } else if (obj.type === "error") {
-      // opencode reports failures as `{"type":"error","error":{...}}` events on
-      // STDOUT — NOT stderr. Swallowing these is why a failed run showed the
-      // useless "(no output)" instead of the actual error. Surface them.
-      const msg = extractErrorMsg(obj.error);
-      if (msg) errors.push(msg);
-    }
-  }
-
-  const content = textParts.join("").trim();
-  if (content.length > 0) {
-    return { content, success: true, rawEvents: events };
-  }
-  if (errors.length > 0) {
-    return { content: errors.join("; "), success: false, error: errors.join("; "), rawEvents: events };
-  }
-  return {
-    content,
-    success: false,
-    rawEvents: events,
+  const settle = (result: AgentRunResult) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (opts.signal) opts.signal.removeEventListener("abort", onExternalAbort);
+    cleanupRun(runId, keys);
+    try {
+      // stream is an async iterable — break it via abort of the reader
+      void stream.stream.return?.(undefined as never);
+    } catch { /* ignore */ }
+    debugLog("opencode-close", opts.roomId, opts.agentName, "run settled", {
+      runId, sessionId, success: result.success, cancelled: result.cancelled,
+      error: result.error, contentLen: result.content.length,
+      aborted: abortState.aborted, timedOut: abortState.timedOut,
+    });
+    resolve(result);
   };
+
+  let resolve!: (r: AgentRunResult) => void;
+  const runPromise = new Promise<AgentRunResult>((r) => { resolve = r; });
+
+  const timer = setTimeout(() => {
+    abortState.timedOut = true;
+    // ask server to abort the session; settle immediately with partial text
+    void (async () => {
+      try {
+        await client.session.abort({ path: { id: sessionId } });
+      } catch { /* ignore */ }
+      const content = textParts.join("").trim();
+      settle({
+        content,
+        success: false,
+        error: `timeout after ${timeoutMs}ms`,
+        rawEvents: undefined,
+      });
+    })();
+  }, timeoutMs);
+  timer.unref?.();
+
+  const onExternalAbort = () => {
+    abortState.aborted = true;
+    void client.session.abort({ path: { id: sessionId } }).catch(() => {});
+  };
+  if (opts.signal) {
+    if (opts.signal.aborted) onExternalAbort();
+    else opts.signal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+
+  // 4. consume SSE events for this session.
+  //    SDK wraps each SSE frame as { payload: { type, properties } } —
+  //    unwrap defensively (older SDKs exposed the payload directly).
+  const consume = (async () => {
+    try {
+      for await (const frame of stream.stream as AsyncIterable<{ payload?: any; type?: string; properties?: any }>) {
+        if (settled) break;
+        const wrapper = frame as { payload?: any };
+        const event = wrapper.payload ?? frame;
+        const props = event.properties ?? {};
+        const evType = event.type ?? "";
+
+        if (evType === "message.updated" && props.info?.sessionID === sessionId) {
+          const info = props.info;
+          if (info.role === "assistant" && info.error) {
+            sawAssistantError = true;
+            const msg = extractErrorMsg(info.error);
+            if (msg) {
+              errors.push(msg);
+              emit?.({ type: "error", message: msg });
+            }
+          }
+        }
+        if (evType === "session.error" && props.sessionID === sessionId) {
+          sawAssistantError = true;
+          const msg = extractErrorMsg(props.error);
+          if (msg) {
+            errors.push(msg);
+            emit?.({ type: "error", message: msg });
+          }
+        }
+
+        if (evType === "message.part.delta" && props.sessionID === sessionId) {
+          // streaming delta: { sessionID, messageID, partID, field, delta }.
+          // Only field==="text" on a TEXT part is reply content — reasoning
+          // deltas (field "text" on a reasoning part) must NOT leak in.
+          if (props.field === "text" && typeof props.delta === "string" && props.delta.length > 0) {
+            if (ssePartTypes.get(props.partID) === "reasoning") continue;
+            textParts.push(props.delta);
+            emit?.({ type: "text_delta", delta: props.delta });
+          }
+        }
+
+        if (evType === "message.part.updated" && props.part?.sessionID === sessionId) {
+          const part = props.part;
+          // track partID → type so part.delta frames can be classified
+          // (reasoning deltas must NOT leak into the reply content)
+          if (part.id) ssePartTypes.set(part.id, part.type);
+          if (part.type === "step-start") {
+            emit?.({ type: "step_start", step: "step" });
+          } else if (part.type === "step-finish") {
+            emit?.({ type: "step_finish", reason: part.reason ?? "stop" });
+          } else if (part.type === "tool") {
+            const toolName = part.tool ?? "tool";
+            const toolInput = part.state?.input;
+            const toolOutput = part.state?.output;
+            const status = part.state?.status;
+            // surface each tool call once, then refresh when it completes.
+            // the pending frame has empty input — wait for running/completed
+            // so the UI gets the actual command text.
+            const key = part.callID ?? `${toolName}:${part.id}`;
+            const meaningful = status === "running" || status === "completed" || status === "error";
+            if (!toolSeen.has(key) && meaningful) {
+              toolSeen.add(key);
+              toolOutputs.set(key, toolOutput);
+              emit?.({ type: "tool_use", tool: toolName, input: toolInput, output: toolOutput });
+            } else if (status === "completed" || status === "error") {
+              toolOutputs.set(key, toolOutput);
+              emit?.({ type: "tool_use", tool: toolName, input: toolInput, output: toolOutput, silent: true });
+            }
+          }
+          // text/reasoning part.updated frames are cumulative snapshots —
+          // the part.delta stream below already covers them; skip here.
+        }
+
+        if (evType === "session.idle" && props.sessionID === sessionId) {
+          break;
+        }
+      }
+    } catch (err) {
+      if (!settled) {
+        const msg = err instanceof Error ? err.message : String(err);
+        debugLog("opencode-stream", opts.roomId, opts.agentName, "SSE consume error", { runId, sessionId, error: msg });
+        errors.push(`event stream error: ${msg}`);
+      }
+    }
+  })();
+
+  // 5. send the prompt (this triggers the agent loop on the server).
+  //    prompt() resolves when the turn completes; we don't rely on that —
+  //    the SSE loop settles first. But we await it to catch request-level
+  //    failures (400s, auth errors).
+  try {
+    await client.session.prompt({
+      path: { id: sessionId },
+      query: { directory: cwd },
+      body: {
+        parts: [{ type: "text", text: opts.prompt }],
+        ...(opts.opencodeAgent ? { agent: opts.opencodeAgent } : {}),
+        ...(model.providerID && model.modelID
+          ? { model: { providerID: model.providerID, modelID: model.modelID } }
+          : {}),
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    debugLog("opencode-prompt", opts.roomId, opts.agentName, "prompt failed", { runId, sessionId, error: msg });
+    errors.push(msg);
+  }
+
+  // 6. settle: prompt resolved (success/idle) or errored
+  const content = textParts.join("").trim();
+  if (abortState.aborted) {
+    settle({ content, success: false, error: "aborted by user", cancelled: true });
+  } else if (errors.length > 0 && content.length === 0) {
+    settle({ content: errors.join("; "), success: false, error: errors.join("; ") });
+  } else if (content.length > 0) {
+    settle({ content, success: !sawAssistantError, error: sawAssistantError ? errors.join("; ") : undefined });
+  } else if (errors.length > 0) {
+    settle({ content: errors.join("; "), success: false, error: errors.join("; ") });
+  } else {
+    settle({
+      content: "",
+      success: false,
+      error: `model returned no output (session ${sessionId}, ${sawAssistantError ? "assistant error" : "no error event"})`,
+    });
+  }
+
+  void consume;
+  return runPromise;
 }
+
+/** Test-only exports (internal helpers surfaced for unit tests). */
+export { extractErrorMsg as extractErrorMsgForTest, splitModel as splitModelForTest };
 
 /**
  * Pull a readable message out of opencode's `error` field. opencode nests
@@ -393,172 +572,4 @@ function extractErrorMsg(err: unknown): string {
     try { return JSON.stringify(o.data).slice(0, 300); } catch { /* fall through */ }
   }
   try { return JSON.stringify(o).slice(0, 300); } catch { return ""; }
-}
-
-/**
- * Consume all complete top-level JSON objects from the start of `buf`.
- *
- * opencode's `--format json` mode emits concatenated JSON events with no
- * delimiter; each event is one `{...}` whose string values may contain
- * literal newlines (multi-line text deltas, pretty-printed tool output).
- * Splitting by `\n` shreds them. We walk the buffer tracking brace depth
- * and string/escape state, returning each completed object. Malformed
- * regions are skipped past so a single bad event doesn't deadlock the
- * stream.
- */
-export function consumeJsonObjects(buf: string): { consumed: number; objects: any[] } {
-  const objects: any[] = [];
-  let cursor = 0;
-
-  while (cursor < buf.length) {
-    // skip whitespace / delimiters between events
-    let objStart = cursor;
-    while (objStart < buf.length && buf[objStart] !== "{") objStart++;
-    if (objStart >= buf.length) {
-      return { consumed: buf.length, objects };
-    }
-
-    // find the matching closing `}` respecting strings + escapes
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let i = objStart;
-    for (; i < buf.length; i++) {
-      const c = buf[i];
-      if (escape) { escape = false; continue; }
-      if (inString) {
-        if (c === "\\") { escape = true; continue; }
-        if (c === '"') { inString = false; continue; }
-        continue;
-      }
-      if (c === '"') { inString = true; continue; }
-      if (c === "{") depth++;
-      else if (c === "}") {
-        depth--;
-        if (depth === 0) break;
-      }
-    }
-
-    if (i >= buf.length) {
-      // incomplete object — preserve from objStart so we retry after more data
-      return { consumed: objStart, objects };
-    }
-
-    const candidate = buf.slice(objStart, i + 1);
-    try {
-      objects.push(JSON.parse(candidate));
-      cursor = i + 1;
-    } catch {
-      // malformed JSON at this boundary — skip past and try the next object
-      cursor = i + 1;
-    }
-  }
-
-  return { consumed: buf.length, objects };
-}
-
-/* ---- registry for cross-process cancellation ----------------------------- */
-
-const activeChildren = new Map<string, ChildProcess>();
-/** roomKey (`roomId:agentId` or bare `agentId`) → runId, for stop-by-room-agent */
-const activeByRoomAgent = new Map<string, string>();
-/** runId → AbortController, so /api/agents/stop can cancel the run cleanly
- *  (cancelled:true) instead of the kill path resolving as a generic failure. */
-const activeControllers = new Map<string, AbortController>();
-/** runId → run metadata for the /api/runtime/runs liveness endpoint. */
-const activeMeta = new Map<string, { roomId?: string; agentId?: string; startedAt: number }>();
-
-export function registerRun(
-  runId: string,
-  child: ChildProcess,
-  meta?: { roomId?: string; agentId?: string },
-): AbortController {
-  activeChildren.set(runId, child);
-  const controller = new AbortController();
-  activeControllers.set(runId, controller);
-  activeMeta.set(runId, { roomId: meta?.roomId, agentId: meta?.agentId, startedAt: Date.now() });
-  child.once("close", () => {
-    activeChildren.delete(runId);
-    activeControllers.delete(runId);
-    activeMeta.delete(runId);
-  });
-  return controller;
-}
-
-/** Register alternate lookup keys (roomId:agentId, agentId) for the same run
- *  so /api/agents/stop without a runId can still find and kill it. */
-export function registerRunAliases(runId: string, keys: string[]): void {
-  for (const k of keys) {
-    if (!k) continue;
-    activeByRoomAgent.set(k, runId);
-  }
-}
-
-/** Remove alias keys once the run ends. */
-export function unregisterRunAliases(runId: string, keys: string[]): void {
-  for (const k of keys) {
-    if (activeByRoomAgent.get(k) === runId) activeByRoomAgent.delete(k);
-  }
-}
-
-/** Snapshot of currently-live runs for the liveness endpoint. */
-export function listRuns(): Array<{ runId: string; roomId?: string; agentId?: string; startedAt: number }> {
-  const out: Array<{ runId: string; roomId?: string; agentId?: string; startedAt: number }> = [];
-  for (const [runId, meta] of activeMeta) {
-    if (!activeChildren.has(runId)) continue; // close event pending — treat as dead
-    out.push({ runId, roomId: meta.roomId, agentId: meta.agentId, startedAt: meta.startedAt });
-  }
-  return out;
-}
-
-/** Abort a run via its AbortController — the run resolves as cancelled:true
- *  (a deliberate user interrupt, NOT a failure). Falls back to killTree when
- *  no controller is registered. */
-export function abortRun(runId: string): boolean {
-  const controller = activeControllers.get(runId);
-  if (controller) {
-    controller.abort();
-    return true;
-  }
-  return killRun(runId);
-}
-
-/** Abort by room/agent key (or any alias) — resolves to a runId first. */
-export function abortRunByKey(key: string): boolean {
-  const runId = activeByRoomAgent.get(key);
-  if (!runId) return false;
-  return abortRun(runId);
-}
-
-export function killRun(runId: string): boolean {
-  const child = activeChildren.get(runId);
-  if (!child) return false;
-  killTree(child);
-  activeChildren.delete(runId);
-  return true;
-}
-
-/** Kill by room/agent key (or any alias) — resolves to a runId first. */
-export function killRunByKey(key: string): boolean {
-  const runId = activeByRoomAgent.get(key);
-  if (!runId) return false;
-  return killRun(runId);
-}
-
-/**
- * Kill the process AND its children. On Windows child.kill() only kills the
- * immediate cmd.exe shim — the spawned `opencode` grandchild keeps running
- * and holds the stdout pipe, so the parent's 'close' event never fires and
- * the run promise hangs forever (leaking the agent's running slot). taskkill
- * /T walks the whole process tree.
- */
-function killTree(child: ChildProcess): void {
-  try {
-    if (child.pid == null) return;
-    if (process.platform === "win32") {
-      execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
-    } else {
-      child.kill("SIGKILL");
-    }
-  } catch { /* ignore */ }
 }

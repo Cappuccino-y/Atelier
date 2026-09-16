@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
-import { ArrowUp, Paperclip, GripHorizontal, Loader2, X } from "lucide-react";
+import { ArrowUp, Paperclip, GripHorizontal, Loader2, X, OctagonX } from "lucide-react";
 import type { Agent, Attachment } from "@/types";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -9,8 +9,10 @@ type Props = {
   agents: Agent[];
   /** Target room for image uploads (required for attachments). */
   roomId?: string;
-  onSend: (content: string, mentionedIds: string[], attachments: Attachment[]) => void;
+  onSend: (content: string, mentionedIds: string[], attachments: Attachment[], interrupt?: boolean) => void;
   disabled?: boolean;
+  /** when true (room has live runs), show the interrupt-steer toggle */
+  hasActiveRuns?: boolean;
 };
 
 /** Local state for an image being uploaded from paste/picker. */
@@ -41,8 +43,13 @@ function formatLastSeen(ts: number): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-export function Composer({ agents, roomId, onSend, disabled }: Props) {
+export function Composer({ agents, roomId, onSend, disabled, hasActiveRuns }: Props) {
   const [text, setText] = useState("");
+  const [interruptMode, setInterruptMode] = useState(false);
+  // auto-disable interrupt mode when runs finish
+  useEffect(() => {
+    if (!hasActiveRuns) setInterruptMode(false);
+  }, [hasActiveRuns]);
   const [mentionStart, setMentionStart] = useState<number | null>(null);
   const [mentionQuery, setMentionQuery] = useState("");
   const [highlightIdx, setHighlightIdx] = useState(0);
@@ -286,10 +293,13 @@ export function Composer({ agents, roomId, onSend, disabled }: Props) {
       .map((u) => u.attachment!);
     if (disabled || uploads.some((u) => u.status === "uploading")) return;
     if (!trimmed && atts.length === 0) return;
-    onSend(trimmed, parseMentions(trimmed), atts);
+    // interrupt mode: abort live runs + route the correction with an
+    // interrupt report (attachments can't ride the steering prompt — dropped)
+    onSend(trimmed, parseMentions(trimmed), interruptMode ? [] : atts, interruptMode);
     setText("");
     setShowDropdown(false);
     setMentionStart(null);
+    setInterruptMode(false);
     setUploads((prev) => {
       for (const u of prev) URL.revokeObjectURL(u.previewUrl);
       return [];
@@ -464,17 +474,48 @@ export function Composer({ agents, roomId, onSend, disabled }: Props) {
               e.target.value = "";
             }}
           />
+          {/* interrupt-steer toggle: visible while agents are running.
+              ON  → abort live runs, then deliver the correction + interrupt
+                    report to the mentioned agent (default Atlas).
+              OFF → normal send (queues behind in-flight work). */}
+          {hasActiveRuns && (
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={() => setInterruptMode(v => !v)}
+              title={interruptMode
+                ? "中断模式已开启：发送后将中止当前运行并立即纠偏"
+                : "开启中断模式：中止当前运行并立即把这条指示发给 Atlas"}
+              aria-pressed={interruptMode}
+              className={cn(
+                "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[11px] font-medium shrink-0 border transition-colors",
+                interruptMode
+                  ? "bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
+                  : "bg-white border-zinc-200 text-zinc-500 hover:text-zinc-800 hover:border-zinc-300"
+              )}
+            >
+              <OctagonX className="h-3.5 w-3.5" />
+              中断纠偏
+            </button>
+          )}
+          {interruptMode && (
+            <span className="text-[10.5px] text-red-600 font-medium shrink-0">
+              发送 = 中止当前任务 + 立即纠偏
+            </span>
+          )}
           <div className="flex-1" />
           <Button
             type="button"
             onClick={handleSend}
             disabled={!canSend}
-            aria-label="Send"
+            aria-label={interruptMode ? "Send with interrupt" : "Send"}
             className={cn(
               "h-9 w-9 rounded-full shrink-0 transition-all duration-150",
-              canSend
-                ? "bg-indigo-600 hover:bg-indigo-700 text-white shadow-[0_4px_14px_-4px_rgba(99,102,241,0.55)] hover:shadow-[0_6px_18px_-4px_rgba(99,102,241,0.7)]"
-                : "bg-zinc-200 text-zinc-400 cursor-not-allowed shadow-none"
+              canSend && interruptMode
+                ? "bg-red-600 hover:bg-red-700 text-white shadow-[0_4px_14px_-4px_rgba(220,38,38,0.55)] hover:shadow-[0_6px_18px_-4px_rgba(220,38,38,0.7)]"
+                : canSend
+                  ? "bg-indigo-600 hover:bg-indigo-700 text-white shadow-[0_4px_14px_-4px_rgba(99,102,241,0.55)] hover:shadow-[0_6px_18px_-4px_rgba(99,102,241,0.7)]"
+                  : "bg-zinc-200 text-zinc-400 cursor-not-allowed shadow-none"
             )}
           >
             <ArrowUp className="h-4 w-4" strokeWidth={2.75} />

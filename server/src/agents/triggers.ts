@@ -16,6 +16,7 @@ import {
 } from "./handoff.js";
 import { buildEchoFallback } from "./implicit-handoff.js";
 import { decideRetry, sleep } from "./retry.js";
+import { noteRunTool, summarizeToolInput } from "./process-agent.js";
 import { nanoid } from "nanoid";
 import { debugLog } from "./debug.js";
 
@@ -413,6 +414,12 @@ type TriggerParams = {
    * comment for industry rationale).
    */
   handoff?: HandoffDirectiveV2;
+  /**
+   * Explicit user-side targets (Composer mention list / interrupt-steer).
+   * Wins over text-parsed mentions — the UI already resolved names against
+   * the roster, so re-parsing prose would just re-introduce fragility.
+   */
+  mentionedAgentIds?: string[];
 };
 
 /**
@@ -434,10 +441,14 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   let targets: Array<{ id: string; name: string }> = [];
 
   if (params.authorId === "user") {
-    // User messages: parse @mentions from text. Simple, unambiguous.
-    targets = extractMentions(params.content);
+    // User messages: explicit mention list (Composer/interrupt-steer) wins;
+    // fall back to parsing @mentions from text for plain-text sends.
+    targets = (params.mentionedAgentIds && params.mentionedAgentIds.length > 0)
+      ? params.mentionedAgentIds.map((id) => ({ id, name: id }))
+      : extractMentions(params.content);
     debugLog("trigger", params.roomId, "user", "user message routed", {
       mentions: targets.map((t) => t.id),
+      explicit: !!(params.mentionedAgentIds && params.mentionedAgentIds.length > 0),
       contentHead: params.content.slice(0, 200),
     });
   } else if (params.handoff && params.handoff.to.length > 0) {
@@ -712,6 +723,7 @@ async function invokeAgentAsync(opts: {
                 input: event.input,
                 timestamp: ts(),
               });
+              noteRunTool(runId, event.tool, summarizeToolInput(event.tool, event.input));
               break;
             case "step_start":
               sendAll("agent.thinking", {
@@ -1426,13 +1438,29 @@ async function invokeAgentAsync(opts: {
 
   if (runningAgents.has(key)) {
     const q = agentQueues.get(key) ?? [];
-    q.push(task);
+    // User messages JUMP THE QUEUE (steering/follow-up semantics): when a
+    // human types while the agent is busy, their correction should be the
+    // NEXT thing this agent processes — behind the in-flight turn only, not
+    // behind already-queued handoff work. Agent-to-agent handoffs keep FIFO
+    // order. Self-talk ticks stay at the back.
+    if (opts.source === "user") {
+      // insert after any already-queued user tasks, before agent handoffs
+      let insertAt = 0;
+      for (const t of q) {
+        if ((t as { userSource?: boolean }).userSource) insertAt++;
+        else break;
+      }
+      (task as { userSource?: boolean }).userSource = true;
+      q.splice(insertAt, 0, task);
+    } else {
+      q.push(task);
+    }
     agentQueues.set(key, q);
     sendAll("agent.thinking", {
       roomId: opts.roomId,
       agentId: opts.agentId,
       runId,
-      message: "Queued — waiting for previous turn",
+      message: opts.source === "user" ? "Queued — user message runs next" : "Queued — waiting for previous turn",
       pending: true,
       timestamp: Date.now(),
     });

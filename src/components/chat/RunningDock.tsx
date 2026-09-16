@@ -22,6 +22,8 @@ export type RunningRun = {
   lastEventAt: number;
   runId?: string;
   tool?: string;
+  /** one-line tool input summary (e.g. the bash command being executed) */
+  toolInput?: string | null;
   textTail?: string;
   /** "#2" suffix when the same role runs in parallel */
   instanceLabel?: string;
@@ -88,11 +90,19 @@ function RunRow({ run, now, onStop }: {
         </div>
         <div className="flex items-center gap-2 min-w-0">
           {run.tool && (
-            <code className="text-[10px] leading-none px-1.5 py-1 rounded-md bg-zinc-200/60 border border-zinc-200 text-zinc-500 font-mono max-w-[170px] truncate shrink-0">
+            <code className="text-[10px] leading-none px-1.5 py-1 rounded-md bg-zinc-200/60 border border-zinc-200 text-zinc-500 font-mono max-w-[110px] truncate shrink-0">
               {run.tool}
             </code>
           )}
-          {tail ? (
+          {run.toolInput && (
+            <code
+              className="text-[10.5px] leading-none px-1.5 py-1 rounded-md bg-indigo-50 border border-indigo-100 text-indigo-700 font-mono min-w-0 flex-1 truncate"
+              title={run.toolInput}
+            >
+              {run.toolInput}
+            </code>
+          )}
+          {!run.toolInput && tail && (
             <span
               className={cn(
                 "text-[11.5px] truncate min-w-0 flex-1",
@@ -101,7 +111,8 @@ function RunRow({ run, now, onStop }: {
             >
               {tail}
             </span>
-          ) : (
+          )}
+          {!run.toolInput && !tail && (
             !stalled && (
               <span className="text-[11px] text-zinc-400 flex items-center gap-1 min-w-0">
                 thinking
