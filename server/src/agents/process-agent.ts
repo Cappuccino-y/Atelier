@@ -397,6 +397,9 @@ async function runServerAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   const toolOutputs = new Map<string, unknown>();
   /** partID → part type, so reasoning deltas can be excluded from content */
   const ssePartTypes = new Map<string, string>();
+  /** last text partID seen — a switch to a new partID means the model started
+   *  a new narration segment; inject a paragraph break between them */
+  let currentTextPartId: string | undefined;
 
   const settle = (result: AgentRunResult) => {
     if (settled) return;
@@ -484,6 +487,15 @@ async function runServerAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
           // deltas (field "text" on a reasoning part) must NOT leak in.
           if (props.field === "text" && typeof props.delta === "string" && props.delta.length > 0) {
             if (ssePartTypes.get(props.partID) === "reasoning") continue;
+            // opencode emits each inter-tool narration as a SEPARATE text part,
+            // and consecutive parts arrive with NO separator — the reply comes
+            // out as a 2000-char single line ("paragraph fusion"). When the
+            // stream switches to a NEW text part, inject a paragraph break.
+            if (currentTextPartId && currentTextPartId !== props.partID) {
+              textParts.push("\n\n");
+              emit?.({ type: "text_delta", delta: "\n\n" });
+            }
+            currentTextPartId = props.partID;
             textParts.push(props.delta);
             emit?.({ type: "text_delta", delta: props.delta });
           }
