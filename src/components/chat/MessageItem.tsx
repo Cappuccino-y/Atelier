@@ -18,6 +18,7 @@ import {
   X,
   Waypoints,
   Trash2,
+  ChevronDown,
 } from "lucide-react";
 import { useState, useCallback, useEffect, memo } from "react";
 import { api, fileUrl } from "@/lib/api";
@@ -235,6 +236,11 @@ function DiffCard({
   handoffTo?: Agent;
 }) {
   const { files, remainder } = extractFileSummary(stripTag(content, "RESULT"));
+  // Answer-first (industry pattern: "keep the answer visually primary" —
+  // UI Potion AI Response Rendering / OpenHands EventGroup): the agent's
+  // prose renders as normal markdown at the top; the file-change summary is
+  // a collapsed disclosure instead of a monospace wall squeezing the reply.
+  const [showFiles, setShowFiles] = useState(false);
   return (
     <div className="relative my-1.5 rounded-[10px] border border-emerald-200/80 bg-white overflow-hidden">
       <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-emerald-500" />
@@ -248,32 +254,45 @@ function DiffCard({
           {elapsedSince(timestamp)}
         </span>
       </div>
-      <div className="p-3 space-y-1.5">
-        {files.length > 0 && (
-          <div className="space-y-1">
-            {files.map((f, i) => (
-              <div key={i} className="flex items-center gap-2 text-[12.5px]">
-                {f.kind === "added" && (
-                  <FilePlus className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                )}
-                {f.kind === "modified" && (
-                  <FileCode className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-                )}
-                {f.kind === "removed" && (
-                  <FileMinus className="h-3.5 w-3.5 text-red-600 shrink-0" />
-                )}
-                <span className="font-mono text-zinc-700">
-                  {f.kind === "added" ? "+" : f.kind === "modified" ? "~" : "-"}
-                  {f.count} {f.kind}
-                </span>
-              </div>
-            ))}
+      <div className="p-3 space-y-2">
+        {remainder && (
+          <div className="prose-chat text-[13.5px] leading-relaxed text-zinc-800">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+              {remainder}
+            </ReactMarkdown>
           </div>
         )}
-        {remainder && (
-          <pre className="text-[12px] font-mono text-zinc-700 bg-zinc-50 border border-zinc-200 rounded-md p-2 overflow-x-auto whitespace-pre-wrap">
-            {remainder}
-          </pre>
+        {files.length > 0 && (
+          <div>
+            <button
+              onClick={() => setShowFiles(v => !v)}
+              className="inline-flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 transition-colors px-1.5 py-0.5 rounded-md hover:bg-zinc-100"
+            >
+              <ChevronDown className={cn("h-3 w-3 transition-transform", !showFiles && "-rotate-90")} />
+              {files.length} 项文件变更
+            </button>
+            {showFiles && (
+              <div className="mt-1.5 space-y-1 pl-1">
+                {files.map((f, i) => (
+                  <div key={i} className="flex items-center gap-2 text-[12px]">
+                    {f.kind === "added" && (
+                      <FilePlus className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                    )}
+                    {f.kind === "modified" && (
+                      <FileCode className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                    )}
+                    {f.kind === "removed" && (
+                      <FileMinus className="h-3.5 w-3.5 text-red-600 shrink-0" />
+                    )}
+                    <span className="font-mono text-zinc-700">
+                      {f.kind === "added" ? "+" : f.kind === "modified" ? "~" : "-"}
+                      {f.count} {f.kind}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
       {handoffTo && (

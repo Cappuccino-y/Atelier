@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Wrench } from "lucide-react";
-import { cn, formatRelativeTime } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type { Agent } from "@/types";
+import { StreamingMarkdown } from "./StreamingMarkdown";
 
 /**
  * One inline card per LIVE agent run, rendered after the last message.
@@ -81,14 +82,13 @@ function StreamingCard({ card, now }: { card: StreamingCardData; now: number }) 
         )}
       </button>
 
-      {/* live stream body — clean text deltas only; tool rows shown as chips */}
+      {/* live stream body — real markdown (streaming-safe), tool rows as chips */}
       {open && (
         <div className="px-3 pb-2.5 pt-0.5 border-t border-zinc-200/60">
           {tail ? (
-            <p className="text-[12.5px] leading-relaxed text-zinc-600 whitespace-pre-wrap break-words max-h-40 overflow-y-auto shimmer-text">
-              {tail}
-              <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-indigo-400 align-text-bottom animate-pulse rounded-sm" />
-            </p>
+            <div className="prose-chat text-[12.5px] leading-relaxed text-zinc-600 max-h-56 overflow-y-auto">
+              <StreamingMarkdown text={tail} streaming className="prose-chat" />
+            </div>
           ) : card.tool ? (
             <div className="flex items-center gap-1.5 pt-1.5 text-[11.5px] text-zinc-500">
               <Wrench className="h-3 w-3 text-zinc-400" />
