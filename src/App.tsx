@@ -184,6 +184,36 @@ export default function App() {
       .filter((r): r is RunningRun => r !== null);
   }, [liveRuns, currentRoomId, agentMap, streamingTool, streamingToolInput, streamingText]);
 
+  // inline streaming cards for the message list — same data as roomRuns but
+  // keyed by runId so parallel instances never interleave, with a longer
+  // text tail (cards are the primary streaming surface; the dock is the
+  // compact one)
+  const streamingCards = useMemo(() => {
+    if (!currentRoomId) return [];
+    const perAgent: Record<string, number> = {};
+    const ordered = Object.values(liveRuns)
+      .filter(r => r.roomId === currentRoomId)
+      .sort((a, b) => a.startedAt - b.startedAt);
+    return ordered
+      .map(r => {
+        const agent = agentMap.get(r.agentId);
+        if (!agent) return null;
+        perAgent[r.agentId] = (perAgent[r.agentId] ?? 0) + 1;
+        const sKey = r.runId ? `${currentRoomId}:${r.runId}` : `${currentRoomId}:${r.agentId}`;
+        return {
+          key: r.key,
+          agent,
+          runId: r.runId,
+          startedAt: r.startedAt,
+          tool: streamingTool[sKey] ?? r.lastTool,
+          toolInput: streamingToolInput[sKey],
+          textTail: streamingText[sKey]?.slice(-600),
+          instanceLabel: perAgent[r.agentId] > 1 ? `#${perAgent[r.agentId]}` : undefined,
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+  }, [liveRuns, currentRoomId, agentMap, streamingTool, streamingToolInput, streamingText]);
+
   // stable ref for activity appender (avoid re-binding ws handler)
   const pushActivity = useRef((ev: Omit<ActivityEvent, "id" | "timestamp">) => {
     setActivities(curr => {
@@ -1028,6 +1058,7 @@ export default function App() {
         events={events}
         activities={activities}
         runs={roomRuns}
+        streamingCards={streamingCards}
         wsStatus={wsStatus}
         showRightPanel={rightPanelOpen}
         onSelectRoom={setCurrentRoomId}

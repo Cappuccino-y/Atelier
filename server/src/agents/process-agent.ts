@@ -16,6 +16,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { Agent as UndiciAgent, fetch as undiciFetch } from "undici";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { config } from "../config.js";
 import { debugLog } from "./debug.js";
@@ -144,7 +145,33 @@ async function getOpencodeClient(): Promise<OpencodeClient> {
 
     serverProc = proc;
     serverUrl = url;
-    serverClient = createOpencodeClient({ baseUrl: url });
+    // CRITICAL: Node's built-in fetch (undici) enforces a 300s body timeout
+    // by default. Long forge turns routinely exceed 5 minutes — the prompt
+    // fetch AND the SSE stream both died at exactly ~305s ("fetch failed"),
+    // leaving mid-sentence content that failed schema validation and looped
+    // retries. A dedicated Agent with no timeouts fixes this.
+    const noTimeoutAgent = new UndiciAgent({
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
+    const undiciFetchNoTimeout = (input: any, init?: any) => {
+      // SDK passes a Request object; undici's fetch needs URL + expanded init
+      const u = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const merged: Record<string, unknown> = init
+        ? { ...init }
+        : {
+            method: input.method,
+            headers: input.headers,
+            body: input.body,
+            duplex: "half",
+          };
+      merged.dispatcher = noTimeoutAgent;
+      return undiciFetch(u, merged as any);
+    };
+    serverClient = createOpencodeClient({
+      baseUrl: url,
+      fetch: undiciFetchNoTimeout as unknown as typeof fetch,
+    });
     debugLog("opencode-server", undefined, undefined, "shared server started", { url, pid: proc.pid });
     return serverClient;
   })();

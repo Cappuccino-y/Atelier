@@ -7,6 +7,7 @@ import { MessageList } from "@/components/chat/MessageList";
 import { Composer } from "@/components/chat/Composer";
 import { RoomHeader } from "@/components/chat/RoomHeader";
 import { RunningDock, type RunningRun } from "@/components/chat/RunningDock";
+import { type StreamingCardData } from "@/components/chat/StreamingCards";
 import type {
   Agent, Attachment, Message, Room, Project, Task, Event, ActivityEvent, MemoryEntry,
 } from "@/types";
@@ -26,6 +27,7 @@ type Props = {
   events: Event[];
   activities: ActivityEvent[];
   runs: RunningRun[];
+  streamingCards?: StreamingCardData[];
   wsStatus: WsStatus;
   showRightPanel: boolean;
   onSelectRoom: (id: string) => void;
@@ -149,6 +151,7 @@ export function AppShell(props: Props) {
                 onReply={handleReply}
                 onShowChain={props.onShowChain}
                 onDeleteMessage={props.onDeleteMessage}
+                streamingCards={props.streamingCards}
               />
               <RunningDock
                 runs={runningRuns}

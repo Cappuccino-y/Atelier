@@ -4,6 +4,7 @@ import { ArrowDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Message, Agent } from "@/types";
 import { MessageItem } from "./MessageItem";
+import { StreamingCards, type StreamingCardData } from "./StreamingCards";
 
 type Props = {
   messages: Message[];
@@ -12,10 +13,12 @@ type Props = {
   onReply?: (text: string, targetAgentName: string) => void;
   onShowChain?: (message: Message) => void;
   onDeleteMessage?: (message: Message) => void;
+  /** live run cards rendered after the last message (parallel-safe, runId-keyed) */
+  streamingCards?: StreamingCardData[];
 };
 
 export function MessageList({
-  messages, agents, roomId, onReply, onShowChain, onDeleteMessage,
+  messages, agents, roomId, onReply, onShowChain, onDeleteMessage, streamingCards = [],
 }: Props) {
   const ref = useRef<VirtuosoHandle>(null);
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
@@ -129,7 +132,11 @@ return (
           );
         }}
         components={{
-          Footer: () => <div className="h-2" />,
+          Footer: () => (
+            <div className="h-2">
+              {streamingCards.length > 0 && <StreamingCards cards={streamingCards} />}
+            </div>
+          ),
         }}
         className="flex-1 min-h-0"
       />
