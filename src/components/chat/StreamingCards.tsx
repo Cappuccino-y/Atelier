@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/types";
@@ -33,8 +33,17 @@ function fmtElapsed(ms: number): string {
 
 function StreamingCard({ card, now }: { card: StreamingCardData; now: number }) {
   const [open, setOpen] = useState(true);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const { agent } = card;
   const tail = card.textTail?.trim();
+
+  // Pin the stream body to the bottom on every update. The text grows
+  // append-only, so the top line never reflows (the tail-window shrink bug);
+  // the viewport simply rides the growing content like a terminal.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el && open) el.scrollTop = el.scrollHeight;
+  }, [tail, open]);
 
   return (
     <div
@@ -82,11 +91,16 @@ function StreamingCard({ card, now }: { card: StreamingCardData; now: number }) 
         )}
       </button>
 
-      {/* live stream body — real markdown (streaming-safe), tool rows as chips */}
+      {/* live stream body — real markdown (streaming-safe), tool rows as chips.
+          Full accumulated text (no tail window) + bottom-pinned scroll:
+          content is append-only so lines above never reflow. */}
       {open && (
         <div className="px-3 pb-2.5 pt-0.5 border-t border-zinc-200/60">
           {tail ? (
-            <div className="prose-chat text-[12.5px] leading-relaxed text-zinc-600 max-h-56 overflow-y-auto">
+            <div
+              ref={bodyRef}
+              className="prose-chat text-[12.5px] leading-relaxed text-zinc-600 max-h-56 overflow-y-auto"
+            >
               <StreamingMarkdown text={tail} streaming className="prose-chat" />
             </div>
           ) : card.tool ? (

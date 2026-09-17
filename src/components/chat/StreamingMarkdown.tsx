@@ -47,10 +47,12 @@ export function closeOpenMarkdown(text: string): string {
 }
 
 /** Trailing text from the last completed paragraph onward — bounds re-parsing
- *  cost for very long streams (only the tail re-renders per frame). */
-function streamingWindow(text: string, maxChars = 2400): string {
-  if (text.length <= maxChars) return text;
-  return text.slice(-maxChars);
+ *  cost for very long streams (only the tail re-renders per frame).
+ *  DEPRECATED: sliding windows cause visible top-line shrink/reflow (the
+ *  tail-window reflow bug). Callers now pass the FULL accumulated text and
+ *  pin the container to the bottom instead. Kept as identity for compat. */
+function streamingWindow(text: string, _maxChars = 2400): string {
+  return text;
 }
 
 type Props = {

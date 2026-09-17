@@ -207,7 +207,9 @@ export default function App() {
           startedAt: r.startedAt,
           tool: streamingTool[sKey] ?? r.lastTool,
           toolInput: streamingToolInput[sKey],
-          textTail: streamingText[sKey]?.slice(-600),
+          // FULL accumulated text — the card bottom-pins its scroll; slicing
+          // a tail window here causes the top-line shrink/reflow bug
+          textTail: streamingText[sKey],
           instanceLabel: perAgent[r.agentId] > 1 ? `#${perAgent[r.agentId]}` : undefined,
         };
       })
