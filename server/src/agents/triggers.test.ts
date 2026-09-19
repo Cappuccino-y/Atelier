@@ -1,8 +1,37 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildBargeInPrompt } from "./triggers.js";
+import { buildBargeInPrompt, detectDispatchIntent } from "./triggers.js";
 
 const NOW = 1_700_000_000_000;
+const resolve = (name: string): { id: string } | null =>
+  /^(atlas|forge|lens|echo|scout|writer|trainer|analyst|archivist)$/i.test(name)
+    ? { id: name.toLowerCase() }
+    : null;
+
+describe("detectDispatchIntent — narrated dispatch without structured block", () => {
+  it("fires on the 2026-09-19 atlas resume narration", () => {
+    const content =
+      "收到，接着上次的进度推进。中断前 Forge 正在做剩余视觉修复线，它已经定位到 `/blog` 侧栏 `lg:pt-10` 的对齐 bug，但改动没做完。我现在把这条线重新派给 Forge 续做——带上中断前的进度要点，避免它从头探索。完成后按流程派 Lens 复验，再向你汇总。";
+    assert.equal(detectDispatchIntent(content, resolve), "forge");
+  });
+
+  it("fires on direct hand-over phrasing", () => {
+    assert.equal(detectDispatchIntent("这条任务交给 Lens 复验。", resolve), "lens");
+    assert.equal(detectDispatchIntent("这条线转派给 Forge 续做。", resolve), "forge");
+  });
+
+  it("skips conditional / future wrap-up phrasing (legitimate no-dispatch)", () => {
+    assert.equal(detectDispatchIntent("你说一声「继续」我就派 Forge 逐条改版。", resolve), null);
+    assert.equal(detectDispatchIntent("完成后我让 Lens 复验再向你汇总。", resolve), null);
+    assert.equal(detectDispatchIntent("改完我再派 Lens 复验。", resolve), null);
+    assert.equal(detectDispatchIntent("之后将把任务交给 Forge。", resolve), null);
+  });
+
+  it("ignores mentions of non-agent names", () => {
+    assert.equal(detectDispatchIntent("让 用户 自己硬刷新看看。", resolve), null);
+    assert.equal(detectDispatchIntent("我会把结果发到 中土编年史 里。", resolve), null);
+  });
+});
 
 describe("buildBargeInPrompt — barge-in steering prompt", () => {
   it("includes the interrupt report with elapsed time and last tool", () => {

@@ -369,6 +369,38 @@ function queueKey(roomId: string, agentId: string, instance?: number, as?: strin
 }
 
 /**
+ * Dispatch-intent detector: does the reply ANNOUNCE handing work to a known
+ * agent ("我现在把这条线重新派给 Forge 续做" / "交给 Lens 复验") without the
+ * structured ```handoff``` block that actually routes it?
+ *
+ * Failure mode (2026-09-19 17:46/17:51, "前端优化"): atlas narrated the
+ * dispatch TWICE with no block — routing is structured-only, so nothing
+ * dispatched; worse, the narration itself entered room history and the next
+ * run imitated it (in-context persona drift, cf. vllm#53363 prose-only
+ * drift). Callers use this to schedule ONE disambiguating repair retry.
+ *
+ * False-positive guard: conditional/future phrasing ("你说一声我就派
+ * Forge" / "完成后我让 Lens 复验" / "改完我再派 Lens") within the 8 chars
+ * before the verb is skipped — those are legitimate wrap-ups awaiting user
+ * confirmation, and the repair retry's "若确已收尾…" clause covers the rest.
+ */
+export function detectDispatchIntent(
+  content: string,
+  resolve: (name: string) => { id: string } | null,
+): string | null {
+  const intentRe = /(?:派给|派去|转派给?|交给|交由|发给|让|派)\s*@?([A-Za-z][\w-]{1,15}|[\w一-鿿]{2,8})/g;
+  for (const m of content.matchAll(intentRe)) {
+    // Conditional / future markers right before the verb read as a wrap-up
+    // plan, not an executed dispatch ("我就派…" / "完成后我让…").
+    const before = content.slice(Math.max(0, (m.index ?? 0) - 8), m.index ?? 0);
+    if (/(?:完成后|改完|再说|如果|若你|等你|你回|就|将|稍后|后续)/.test(before)) continue;
+    const named = resolve(m[1]);
+    if (named) return named.id;
+  }
+  return null;
+}
+
+/**
  * Barge-in prompt builder (Codex turn/steer semantics). When a user message
  * targets a RUNNING agent, the in-flight turn is aborted and the user's
  * message becomes the next turn — prefixed with a compact interrupt report
@@ -872,6 +904,17 @@ async function invokeAgentAsync(opts: {
         debugLog("handoff-parse-failed", opts.roomId, opts.agentId, handoffRejected, { mentioned: mentionedAgents.map((m) => m.id) });
       }
 
+      // Dispatch-intent vs structured-routing consistency check (see
+      // detectDispatchIntent). Fires only for the orchestrator and only when
+      // NO handoff-shaped JSON exists at all (a detected-but-broken block is
+      // handoffRejected's job above).
+      const dispatchIntent = (!cancelled && !runFailed && !emittedHandoff && handoffRejected === null && isOrchestratorAgent(opts.agentId))
+        ? detectDispatchIntent(result.content, (name) => getAgentByName(name))
+        : null;
+      if (dispatchIntent) {
+        debugLog("dispatch-intent-no-handoff", opts.roomId, opts.agentId, `reply announces dispatching to @${dispatchIntent} but contains no handoff block`, { contentLen: result.content.length });
+      }
+
       // Multi-instance intent mismatch detection moved into the validation
       // cascade below (multiInstanceRejected) — it now triggers a feedback
       // retry instead of a warn-only pass.
@@ -1141,6 +1184,66 @@ async function invokeAgentAsync(opts: {
               });
             });
           }
+        }
+      } else if (!cancelled && !runFailed && !emittedHandoff && dispatchIntent !== null) {
+        // Narrated dispatch without the structured block: nothing routed, and
+        // the narration itself would teach the NEXT run the same shape
+        // (in-context imitation). ONE repair retry: the trailer shows the
+        // exact JSON shape (few-shot — room history never shows handoff
+        // blocks, they are stripped at insert) and lets the model resolve
+        // ambiguity — a legitimate already-concluded wrap-up just answers
+        // with a summary again, costing one cheap orchestrator run.
+        validationFailed = true;
+        sendAll("system.warning", {
+          roomId: opts.roomId,
+          reason: "dispatch-intent-no-handoff",
+          agentId: opts.agentId,
+          detail: `reply announces dispatching to @${dispatchIntent} but contains no handoff block`,
+          traceId: opts.handoff?.traceId,
+        });
+        const attempt = bumpRetryAttempt(opts.handoff?.traceId ?? `dispatch-intent:${opts.roomId}:${opts.agentId}`);
+        const decision = decideRetry({
+          attempt: attempt - 1,
+          maxRetries: 1,
+          elapsedMs: 0,
+          budgetMs: Infinity,
+          reason: "dispatch intent narrated without structured handoff block",
+        });
+        if (decision.shouldRetry) {
+          retryScheduled = true;
+          sendAll("system.info", {
+            roomId: opts.roomId,
+            reason: "dispatch-intent-retry",
+            agentId: opts.agentId,
+            traceId: opts.handoff?.traceId,
+            retryDelayMs: decision.delayMs,
+          });
+          const retryTrailer = `[ROUTING 修复重试 #${attempt} — 你上一条回复写了"派给/交给"某 agent，但没有输出结构化派工。本房间的路由只认回复末尾的 \`\`\`handoff JSON 块：只叙述不等于已派，上一条回复因此没有产生任何派工。请重发——\n` +
+            `若确实要把任务交给该 agent，在回复末尾输出一个 handoff 块，形状严格如下：\n` +
+            '```handoff\n{"schemaVersion":"2.1","to":["<agent>"],"taskSummary":"<给它的完整任务简报，含接续要点>","requiredOutputSchema":"<result_block|review_block|research_brief|answer_text>"}\n```\n' +
+            `若你只是在描述已完成/待用户拍板的收尾、并不需要现在派活，则直接原样输出你的总结，不要 handoff 块。除上述调整外不要重复其他内容。]`;
+          void (async () => {
+            await sleep(decision.delayMs);
+            return invokeAgentAsync({
+              roomId: opts.roomId,
+              agentId: opts.agentId,
+              instance: opts.instance,
+              as: opts.as,
+              prompt: `${opts.prompt}\n\n${retryTrailer}`,
+              parentMessageId: opts.parentMessageId,
+              source: "agent",
+              signal: opts.signal,
+              handoff: opts.handoff,
+            });
+          })().catch((err) => {
+            console.error("[triggers] dispatch-intent retry failed:", err);
+            sendAll("system.warning", {
+              roomId: opts.roomId,
+              reason: "retry-error",
+              agentId: opts.agentId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
         }
       } else if (!cancelled && !runFailed && !emittedHandoff && (handoffRejected !== null || (requiredSchema && !isOrchestratorAgent(opts.agentId) && !validateOutputAgainstSchema(result.content, requiredSchema)))) {
         validationFailed = true;
