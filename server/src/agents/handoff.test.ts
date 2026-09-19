@@ -214,6 +214,45 @@ describe("parseHandoff — repair (P1-2 regression)", () => {
     assert.equal(d.to[0].id, "atlas");
   });
 
+  it("recovers when the fenced JSON closes the root early with trailing fields (2026-09-19 forge dead-end)", () => {
+    // Production regression ("前端优化" room, 16:00): Forge finished a
+    // complete 5-fix implementation and handed off to Lens, but the fenced
+    // JSON closed the ROOT one `}` early — `...parentChain":[...]}},}}` —
+    // leaving `,"constraints":...,"failurePolicy":...` outside the root. The
+    // fenced candidate fails strict parse, and the OLD start-offset dedupe
+    // then skipped the anchored twin (same `{`, but the balance-scan returns
+    // just the valid root) → parseHandoff null → directives [] → Lens never
+    // dispatched and the whole chain died with zero diagnostics.
+    const brokenFence =
+      '{"schemaVersion":"2.1","to":["lens"],"taskSummary":"无头复验 5 处视觉修复",' +
+      '"requiredOutputSchema":"review_block",' +
+      '"provenance":{"parentAgent":"atlas","parentMessageId":"m1",' +
+      '"context":{"taskSummary":"t","parentChain":["a","b"]}}}}' +
+      ',"constraints":{"deadlineMs":600000,"maxTokens":6000},' +
+      '"failurePolicy":{"onInvalidOutput":"retry","onTimeout":"fallback_echo","maxRetries":1}}';
+    const content = `正文含 CSS 片段 body{display:none} 与引号 "锚点"。\n\n\`\`\`handoff\n${brokenFence}\n\`\`\`\n`;
+    const d = parseHandoff(content, locator);
+    assert.ok(d, "anchored balance-scan twin must be tried, not deduped away");
+    assert.equal(d!.to[0].id, "lens");
+    assert.equal(d!.taskSummary, "无头复验 5 处视觉修复");
+    // the root-only extraction is valid — diagnose must NOT report a failure
+    assert.equal(diagnoseHandoffFailure(content, locator), null);
+  });
+
+  it("diagnoses a fenced-but-broken handoff even without prose @mentions (2026-09-19 silent dead-end)", () => {
+    // The old warning gate required a prose @mention; Forge's "handoff 派
+    // lens 复验" carries none, so a genuinely broken fenced handoff stayed
+    // invisible. diagnose must report the failure from the fenced block alone.
+    const content =
+      "派 lens 复验。\n\n```handoff\n" +
+      '{"schemaVersion":"2.1","to":["lens"]}\n' +
+      "```";
+    const diag = diagnoseHandoffFailure(content, locator);
+    assert.ok(diag, "fenced handoff-shaped failure must be diagnosable");
+    assert.match(diag!, /taskSummary|schema/);
+    assert.equal(parseHandoff(content, locator), null);
+  });
+
   it("finds handoff after CSS code block + prose full of bare Chinese quotes (resume room regression 2)", () => {
     // Lens replied with a long markdown report containing a CSS sample
     // ({...} blocks) and tons of ASCII-quoted Chinese words ("假两栏",

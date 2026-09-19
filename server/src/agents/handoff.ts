@@ -602,9 +602,16 @@ function salvageTopLevelTaskSummary(obj: Record<string, unknown>): void {
  * re-scan the raw content, or the repair is silently undone.
  */
 function locateHandoffJson(content: string): JsonMatch | null {
-  // Deduplicate by start offset (a fenced object is often also found by
-  // the anchor scan; the whole-text scan would find it again).
-  const seen = new Set<number>();
+  // Deduplicate by start+end offset (a fenced object is often also found by
+  // the anchor scan; the whole-text scan would find it again). Deduping by
+  // start ALONE is wrong: candidates that share a start can differ in span —
+  // the fenced extraction returns the RAW fence text (extra trailing fields
+  // after an early root close → parse fails), while the anchored balance-scan
+  // from the same `{` returns just the balanced root (valid). Killing the
+  // second candidate silently dead-ended the chain (observed 2026-09-19,
+  // "前端优化": Forge's complete 5-fix result never reached Lens because the
+  // fenced candidate failed and the valid anchored twin was deduped away).
+  const seen = new Set<string>();
   const candidates = [
     ...fencedCandidates(content),
     ...anchoredCandidates(content),
@@ -612,8 +619,9 @@ function locateHandoffJson(content: string): JsonMatch | null {
     ...truncatedCandidates(content),
   ];
   for (const match of candidates) {
-    if (seen.has(match.start)) continue;
-    seen.add(match.start);
+    const seenKey = `${match.start}:${match.end}`;
+    if (seen.has(seenKey)) continue;
+    seen.add(seenKey);
     let raw: unknown;
     let reparsed = match.text;
     try {
@@ -695,7 +703,24 @@ export function parseHandoff(content: string, locator: AgentLocator): HandoffDir
  * silently-broken chain is debuggable instead of a mystery.
  */
 export function diagnoseHandoffFailure(content: string, locator: AgentLocator): string | null {
-  for (const match of findBalancedJsonObjects(content)) {
+  // Walk EVERY candidate source (fenced / anchored / balanced), not just the
+  // whole-text scan: prose braces can make the whole-text scan swallow the
+  // real handoff (observed 2026-09-19: a CSS snippet's `{` balanced-scanned
+  // straight past the fenced handoff, so diagnose returned null and the
+  // chain died with zero diagnostics), while the anchored scan still finds
+  // it. Same dedupe contract as locateHandoffJson (start+end).
+  const seen = new Set<string>();
+  const candidates = [
+    ...fencedCandidates(content),
+    ...anchoredCandidates(content),
+    ...findBalancedJsonObjects(content),
+  ].filter((m) => {
+    const key = `${m.start}:${m.end}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  for (const match of candidates) {
     let raw: unknown;
     try {
       raw = JSON.parse(match.text);
