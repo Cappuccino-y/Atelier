@@ -726,9 +726,10 @@ export default function App() {
         case "system.warning":
         case "system.info":
         case "system.error": {
-          const p = payload as { reason?: string; error?: string };
+          const p = payload as { reason?: string; error?: string; agentId?: string; aborted?: number };
           if (event === "system.warning") toast.warning(p.reason ?? "warning", p);
           else if (event === "system.error") toast.error(p.error ?? "error", p);
+          else if (p.reason === "barge-in-interrupt") toast.info(`已打断 @${p.agentId} 的当前任务，新指示立即执行`, p);
           break;
         }
         case "self_talk.start":

@@ -475,17 +475,19 @@ export function Composer({ agents, roomId, onSend, disabled, hasActiveRuns }: Pr
             }}
           />
           {/* interrupt-steer toggle: visible while agents are running.
-              ON  → abort live runs, then deliver the correction + interrupt
-                    report to the mentioned agent (default Atlas).
-              OFF → normal send (queues behind in-flight work). */}
+              Plain send: @-mentioning a RUNNING agent barges in — aborts that
+              agent's in-flight turn and takes over immediately (Codex-style
+              steering). This toggle goes further: aborts EVERY live run in
+              the room and routes the correction to the mentioned agent
+              (default Atlas). */}
           {hasActiveRuns && (
             <button
               type="button"
               tabIndex={-1}
               onClick={() => setInterruptMode(v => !v)}
               title={interruptMode
-                ? "中断模式已开启：发送后将中止当前运行并立即纠偏"
-                : "开启中断模式：中止当前运行并立即把这条指示发给 Atlas"}
+                ? "中断模式已开启：发送后将中止整个房间的所有运行并立即纠偏"
+                : "普通发送只会打断被 @ 的 agent；开启后中断整个房间的所有运行"}
               aria-pressed={interruptMode}
               className={cn(
                 "inline-flex items-center gap-1 h-7 px-2 rounded-lg text-[11px] font-medium shrink-0 border transition-colors",

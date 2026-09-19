@@ -16,7 +16,7 @@ import {
 } from "./handoff.js";
 import { buildEchoFallback } from "./implicit-handoff.js";
 import { decideRetry, sleep } from "./retry.js";
-import { noteRunTool, summarizeToolInput } from "./process-agent.js";
+import { noteRunTool, summarizeToolInput, abortRun, listRuns } from "./process-agent.js";
 import { nanoid } from "nanoid";
 import { debugLog } from "./debug.js";
 
@@ -366,6 +366,35 @@ export function expandFanOutTargets(to: Array<{ id: string; name: string; as?: s
 
 function queueKey(roomId: string, agentId: string, instance?: number, as?: string): string {
   return `${roomId}:${workerKeyOf(agentId, instance, as)}`;
+}
+
+/**
+ * Barge-in prompt builder (Codex turn/steer semantics). When a user message
+ * targets a RUNNING agent, the in-flight turn is aborted and the user's
+ * message becomes the next turn — prefixed with a compact interrupt report
+ * so the new turn knows what was in flight. Voice stacks (Pipecat) commit
+ * the partial spoken output to context; our aborted turn's partial
+ * generation is dropped (cancelled runs write no message row), so this
+ * report is the progress carrier.
+ */
+export function buildBargeInPrompt(
+  userPrompt: string,
+  runs: Array<{ startedAt: number; lastTool?: string; lastInput?: string }>,
+  now: number = Date.now(),
+): string {
+  const lines = runs.map((r) => {
+    const elapsed = Math.max(1, Math.round((now - r.startedAt) / 1000));
+    return r.lastTool
+      ? `- 已运行 ${elapsed}s，被中断时正在执行 \`${r.lastTool}\`${r.lastInput ? `: ${r.lastInput}` : ""}`
+      : `- 已运行 ${elapsed}s，被中断时尚未开始工具调用`;
+  });
+  return [
+    "[用户插话中断] 你上一轮运行已被用户的新消息打断（未写完的产物已丢弃，不要假设它已完成）。",
+    ...(lines.length > 0 ? ["中断现场：", ...lines] : []),
+    "请基于中断前的进度和下面的新指示接续，不要重复已完成的部分。",
+    "",
+    `用户新指示：${userPrompt}`,
+  ].join("\n");
 }
 
 function drainQueue(roomId: string, agentId: string, instance?: number, as?: string) {
@@ -826,9 +855,13 @@ async function invokeAgentAsync(opts: {
       const handoffRejected = !runFailed && !emittedHandoff
         ? diagnoseHandoffFailure(result.content, agentLocator)
         : null;
-      if (!emittedHandoff && !runFailed && mentionedAgents.length > 0 && handoffRejected) {
-        // The agent clearly TRIED to route (prose @mentions) but no valid
-        // handoff JSON was found — surface why instead of dying silently.
+      if (!emittedHandoff && !runFailed && handoffRejected) {
+        // The agent clearly TRIED to route (handoff-shaped JSON present) but
+        // nothing parsed — surface why instead of dying silently. No
+        // @mention gate: Forge's "handoff 派 lens" prose carries no @, and a
+        // handoffRejected is only non-null when diagnose DETECTED a
+        // handoff-shaped failure, so the gate was pure noise suppression
+        // that hid the 2026-09-19 dead-end.
         sendAll("system.warning", {
           roomId: opts.roomId,
           reason: "handoff-parse-failed",
@@ -1437,6 +1470,31 @@ async function invokeAgentAsync(opts: {
   };
 
   if (runningAgents.has(key)) {
+    // Barge-in (Codex turn/steer semantics): a user message aimed at a busy
+    // agent interrupts the in-flight turn instead of waiting behind it —
+    // abort every live run of THIS agent in THIS room (multi-instance
+    // included), prepend an interrupt report to the steering prompt, then
+    // queue normally (user tasks already jump ahead of agent handoffs, so
+    // the steering message runs the moment the aborted turn settles).
+    // Agent-to-agent handoffs and self-talk ticks keep FIFO queueing.
+    let bargedIn = false;
+    if (opts.source === "user") {
+      const live = listRuns().filter((r) => r.roomId === opts.roomId && r.agentId === opts.agentId);
+      let aborted = 0;
+      for (const run of live) if (abortRun(run.runId)) aborted++;
+      if (aborted > 0) {
+        bargedIn = true;
+        opts.prompt = buildBargeInPrompt(opts.prompt, live);
+        sendAll("system.info", {
+          roomId: opts.roomId,
+          reason: "barge-in-interrupt",
+          agentId: opts.agentId,
+          aborted,
+          runs: live.map((r) => ({ runId: r.runId, lastTool: r.lastTool })),
+          timestamp: Date.now(),
+        });
+      }
+    }
     const q = agentQueues.get(key) ?? [];
     // User messages JUMP THE QUEUE (steering/follow-up semantics): when a
     // human types while the agent is busy, their correction should be the
@@ -1460,7 +1518,9 @@ async function invokeAgentAsync(opts: {
       roomId: opts.roomId,
       agentId: opts.agentId,
       runId,
-      message: opts.source === "user" ? "Queued — user message runs next" : "Queued — waiting for previous turn",
+      message: bargedIn
+        ? "已中断上一轮 — 正在处理你的新指示"
+        : opts.source === "user" ? "Queued — user message runs next" : "Queued — waiting for previous turn",
       pending: true,
       timestamp: Date.now(),
     });
