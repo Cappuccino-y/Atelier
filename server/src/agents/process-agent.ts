@@ -111,10 +111,13 @@ async function getOpencodeClient(): Promise<OpencodeClient> {
   if (serverStarting) return serverStarting;
 
   serverStarting = (async () => {
-    const proc = spawn("opencode", ["serve", "--hostname=127.0.0.1"], {
-      windowsHide: true,
-      env: { ...process.env },
-    });
+    // Windows: the npm-global opencode CLI is an opencode.cmd shim — CreateProcess
+    // cannot exec it directly (ENOENT, observed 2026-09-18), and the old
+    // `type prompt | opencode run` path worked only because cmd.exe resolved the
+    // shim. Route through cmd.exe for the serve spawn too. Args are constants.
+    const proc = process.platform === "win32"
+      ? spawn("opencode serve --hostname=127.0.0.1", { shell: true, windowsHide: true, env: { ...process.env } })
+      : spawn("opencode", ["serve", "--hostname=127.0.0.1"], { windowsHide: true, env: { ...process.env } });
     const output = { text: "" };
     const url = await new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`opencode serve startup timeout (60s): ${output.text.slice(0, 400)}`)), 60_000);
@@ -128,6 +131,13 @@ async function getOpencodeClient(): Promise<OpencodeClient> {
       };
       proc.stdout?.on("data", onData);
       proc.stderr?.on("data", onData);
+      // spawn failures (ENOENT etc.) arrive via the 'error' event, and 'exit'
+      // may never fire — without this listener Node treats it as unhandled
+      // and KILLS THE WHOLE SERVER PROCESS (observed 2026-09-18).
+      proc.once("error", (err) => {
+        clearTimeout(timer);
+        reject(new Error(`failed to spawn opencode serve: ${err.message}`));
+      });
       proc.once("exit", (code) => {
         clearTimeout(timer);
         reject(new Error(`opencode serve exited early (code ${code}): ${output.text.slice(0, 400)}`));
@@ -182,7 +192,16 @@ async function getOpencodeClient(): Promise<OpencodeClient> {
 /** Best-effort shutdown (used by tests / graceful restart). */
 export function stopSharedServer(): void {
   if (serverProc) {
-    try { serverProc.kill(); } catch { /* ignore */ }
+    const pid = serverProc.pid;
+    try {
+      if (pid && process.platform === "win32") {
+        // shell:true wraps opencode in cmd.exe — killing the wrapper alone
+        // leaves the serve grandchild orphaned. Kill the whole tree.
+        spawn(`taskkill /PID ${pid} /T /F`, { shell: true, windowsHide: true, stdio: "ignore" });
+      } else {
+        serverProc.kill();
+      }
+    } catch { /* ignore */ }
     serverProc = null;
     serverClient = null;
     serverUrl = null;
