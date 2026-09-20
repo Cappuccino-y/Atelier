@@ -18,6 +18,11 @@ export function registerSocket(ws: WebSocket) {
   ws.on("close", () => sockets.delete(ws));
 }
 
+/** test hook — inject a fake socket so unit tests can observe broadcasts */
+export function addClient(ws: WebSocket) {
+  sockets.add(ws);
+}
+
 export function sendAll(event: string, payload: unknown) {
   const msg = JSON.stringify({ event, payload, ts: Date.now() });
   for (const ws of sockets) {

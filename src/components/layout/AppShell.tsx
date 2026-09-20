@@ -28,6 +28,8 @@ type Props = {
   activities: ActivityEvent[];
   runs: RunningRun[];
   streamingCards?: StreamingCardData[];
+  /** live self-talk burst progress (turn counter) — null when no burst */
+  burstProgress?: { turnCount: number; maxTurns: number } | null;
   wsStatus: WsStatus;
   showRightPanel: boolean;
   onSelectRoom: (id: string) => void;
@@ -58,7 +60,6 @@ type Props = {
 
 export function AppShell(props: Props) {
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [selfTalkEnabled, setSelfTalkEnabled] = useState(false);
 
   useEffect(() => {
     function handler(e: KeyboardEvent) {
@@ -133,9 +134,9 @@ export function AppShell(props: Props) {
               <RoomHeader
                 room={props.currentRoom}
                 agents={props.agents}
-                selfTalkEnabled={selfTalkEnabled}
+                burstProgress={props.burstProgress ?? null}
                 activeAgentIds={activeAgentIds}
-                onToggleSelfTalk={() => { setSelfTalkEnabled(v => !v); props.onToggleSelfTalk(); }}
+                onToggleSelfTalk={props.onToggleSelfTalk}
                 onReview={props.onReview}
                 onExport={props.onExport}
                 onExportJson={props.onExportJson}

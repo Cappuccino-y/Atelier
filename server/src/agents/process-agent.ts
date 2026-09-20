@@ -25,6 +25,7 @@ export type AgentEvent =
   | { type: "step_start"; step: string }
   | { type: "text_delta"; delta: string }
   | { type: "tool_use"; tool: string; input?: unknown; output?: unknown; silent?: boolean }
+  | { type: "usage"; tokens: number }
   | { type: "step_finish"; reason: string }
   | { type: "error"; message: string };
 
@@ -416,6 +417,7 @@ async function runServerAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   const toolOutputs = new Map<string, unknown>();
   /** partID → part type, so reasoning deltas can be excluded from content */
   const ssePartTypes = new Map<string, string>();
+  const sseTokenSeen = new Map<string, number>();
   /** last text partID seen — a switch to a new partID means the model started
    *  a new narration segment; inject a paragraph break between them */
   let currentTextPartId: string | undefined;
@@ -488,6 +490,19 @@ async function runServerAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
             if (msg) {
               errors.push(msg);
               emit?.({ type: "error", message: msg });
+            }
+          }
+          // real token usage from the assistant message (opencode reports
+          // per-message cumulative counts in info.tokens; message.updated
+          // fires repeatedly per message — track last seen total per
+          // messageID and emit only the DELTA so burst.ts can sum safely)
+          const t = info.tokens;
+          if (info.role === "assistant" && t && typeof t === "object" && info.id) {
+            const total = (t.input ?? 0) + (t.output ?? 0) + (t.reasoning ?? 0);
+            const prev = sseTokenSeen.get(info.id) ?? 0;
+            if (total > prev) {
+              sseTokenSeen.set(info.id, total);
+              emit?.({ type: "usage", tokens: total - prev });
             }
           }
         }

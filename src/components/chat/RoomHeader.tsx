@@ -13,7 +13,8 @@ import { cn } from "@/lib/utils";
 type Props = {
   room: Room;
   agents: Agent[];
-  selfTalkEnabled: boolean;
+  /** live burst progress when a self-talk burst is running (turns/tokens) */
+  burstProgress?: { turnCount: number; maxTurns: number } | null;
   activeAgentIds?: string[];
   onToggleSelfTalk: () => void;
   onReview: () => void;
@@ -26,7 +27,7 @@ type Props = {
 };
 
 export function RoomHeader({
-  room, agents, selfTalkEnabled, activeAgentIds = [],
+  room, agents, burstProgress = null, activeAgentIds = [],
   onToggleSelfTalk, onReview, onExport, onExportJson, onClear, onDelete, onSettings, onInvite,
 }: Props) {
   const roomAgents = agents.filter(a => room.agentIds.includes(a.id));
@@ -116,12 +117,18 @@ export function RoomHeader({
 
       {/* actions */}
       <div className="flex items-center gap-1.5 shrink-0">
+        {burstProgress && room.status === "self-talk" && (
+          <span className="inline-flex items-center gap-1 h-7 px-2 rounded-md bg-amber-50 border border-amber-200 text-[11px] font-medium text-amber-700 tabular-nums">
+            <Repeat2 className="h-3 w-3" />
+            {burstProgress.turnCount}/{burstProgress.maxTurns}
+          </span>
+        )}
         <Button
           size="sm"
           onClick={onToggleSelfTalk}
           className={cn(
             "h-7 px-2.5 text-[11px] gap-1.5 border",
-            selfTalkEnabled
+            room.status === "self-talk"
               ? "bg-amber-500 hover:bg-amber-600 text-white border-amber-500 shadow-sm shadow-amber-200/60"
               : "bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50"
           )}

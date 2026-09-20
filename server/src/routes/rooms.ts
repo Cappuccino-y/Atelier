@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { db } from "../db.js";
 import { sendAll } from "../broadcast.js";
 import { uploadsDirFor } from "../uploads.js";
+import { stopBurst } from "../agents/burst.js";
 
 export async function routes(app: FastifyInstance) {
   app.get("/api/rooms", async () => {
@@ -47,6 +48,9 @@ export async function routes(app: FastifyInstance) {
     db.prepare(`UPDATE rooms SET ${fields.join(", ")} WHERE id = ?`).run(...vals);
     const row = db.prepare("SELECT * FROM rooms WHERE id = ?").get(req.params.id) as any;
     if (!row) return reply.code(404).send({ error: "not found" });
+    // leaving self-talk mode must tear down any live burst (its chained
+    // scheduler re-checks room status, but an immediate stop is cleaner)
+    if (body.status && body.status !== "self-talk") stopBurst(req.params.id, "room_closed");
     sendAll("room.updated", normalizeRoom(row));
     return normalizeRoom(row);
   });

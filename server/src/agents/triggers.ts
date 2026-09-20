@@ -17,6 +17,7 @@ import {
 import { buildEchoFallback } from "./implicit-handoff.js";
 import { decideRetry, sleep } from "./retry.js";
 import { noteRunTool, summarizeToolInput, abortRun, listRuns } from "./process-agent.js";
+import { recordTurn, registerChainTick, startBurst, abortBurst, burstActive } from "./burst.js";
 import { nanoid } from "nanoid";
 import { debugLog } from "./debug.js";
 
@@ -502,6 +503,17 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
   let targets: Array<{ id: string; name: string }> = [];
 
   if (params.authorId === "user") {
+    // User spoke — abort any live self-talk burst (budget reset). The user's
+    // message routes normally below; in self-talk rooms the answered turn
+    // chains into a FRESH burst (self_talk.tick → startBurst when idle).
+    abortBurst(params.roomId);
+    // In a self-talk room the user's message itself arms a new burst: the
+    // first agent turn lands in a live burst and turn counting/termination
+    // apply from turn 1 (instead of only after a chain dead-ends).
+    const roomRow = db.prepare("SELECT status FROM rooms WHERE id = ?").get(params.roomId) as { status: string } | undefined;
+    if (roomRow?.status === "self-talk") {
+      startBurst(params.roomId);
+    }
     // User messages: explicit mention list (Composer/interrupt-steer) wins;
     // fall back to parsing @mentions from text for plain-text sends.
     targets = (params.mentionedAgentIds && params.mentionedAgentIds.length > 0)
@@ -748,6 +760,9 @@ async function invokeAgentAsync(opts: {
     setAgentStatus(opts.agentId, "online");
     const startedAt = Date.now();
     const ts = () => Date.now();
+    // cumulative real token usage reported by the runtime this turn
+    // (burst.ts falls back to a text estimator when this stays 0)
+    let usageTokens = 0;
 
     try {
       sendAll("agent.thinking", {
@@ -785,6 +800,9 @@ async function invokeAgentAsync(opts: {
                 timestamp: ts(),
               });
               noteRunTool(runId, event.tool, summarizeToolInput(event.tool, event.input));
+              break;
+            case "usage":
+              usageTokens += event.tokens;
               break;
             case "step_start":
               sendAll("agent.thinking", {
@@ -1449,6 +1467,39 @@ async function invokeAgentAsync(opts: {
         timestamp: finishedAt,
       });
 
+      // ---- self-talk burst evaluation (recordTurn is a no-op unless a
+      // burst is live for this room). It may decide to STOP the burst
+      // ([COMPLETE] / budgets / stall-without-replan / question-to-user).
+      // A `replan` outcome overrides normal routing with a one-shot re-plan
+      // prompt to atlas (Magentic-One outer loop). Otherwise the burst
+      // state machine schedules the next chained tick itself.
+      const burstOutcome = recordTurn(opts.roomId, opts.agentId, result.content, usageTokens);
+      if (burstOutcome.replan) {
+        const atlas = getAgentByName("atlas");
+        if (atlas) {
+          void invokeAgentAsync({
+            roomId: opts.roomId,
+            agentId: atlas.id,
+            prompt: `${burstOutcome.replan.prompt}\n\n(最近一条消息：${(db.prepare("SELECT content FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT 2").all(opts.roomId) as { content: string }[]).map(r => r.content.slice(0, 400)).join(" | ")})`,
+            parentMessageId: id,
+            source: "self-talk",
+          }).catch(() => {});
+        }
+        return; // burst continues via the replan turn; skip normal routing
+      }
+
+      // In a self-talk room, a chain that ends without any handoff (agent
+      // concluded, forgot to hand off, or validation-passed-with-no-targets)
+      // must NOT dead-end the autonomous loop — start a burst so the chained
+      // tick picks a next speaker and continues (AutoGen group-chat keeps
+      // selecting speakers until a termination condition; the burst state
+      // machine owns those conditions).
+      const statusRow = db.prepare("SELECT status FROM rooms WHERE id = ?").get(opts.roomId) as { status: string } | undefined;
+      if (statusRow?.status === "self-talk" && !burstActive(opts.roomId) && nextDirectives.length === 0 && !retryScheduled) {
+        debugLog("burst", opts.roomId, opts.agentId, "chain ended in self-talk room — starting burst");
+        startBurst(opts.roomId);
+      }
+
       // Resolve the next set of targets:
       //   1. Schema validation failed + fallback_echo → echo directive wins.
       //   2. Else if validation passed and the agent emitted an explicit
@@ -1633,23 +1684,38 @@ async function invokeAgentAsync(opts: {
 }
 
 export async function triggerOnSelfTalkTick(roomId: string): Promise<void> {
+  // Self-talk entry point. A live burst means the chained-tick loop is
+  // already running — an extra manual tick just nudges the next speaker
+  // immediately (clears the pending timer and fires one tick now).
+  if (burstActive(roomId)) return;
   const room = db.prepare("SELECT status, agent_ids FROM rooms WHERE id = ?").get(roomId) as { status: string; agent_ids: string } | undefined;
-  if (!room || room.status !== "self-talk") return;
-  const agents: string[] = JSON.parse(room.agent_ids || "[]");
-  for (const aId of agents) {
-    const key = queueKey(roomId, aId);
-    if (runningAgents.has(key)) continue;
-    const lastRow = db.prepare(`
-      SELECT content FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT 1
-    `).get(roomId) as { content: string } | undefined;
-    if (!lastRow) break;
-    sendAll("self_talk.tick", { roomId, agentId: aId, timestamp: Date.now() });
-    await invokeAgentAsync({
-      roomId,
-      agentId: aId,
-      prompt: `${lastRow.content}\n\n(self-talk tick — continue the conversation)`,
-      source: "self-talk",
-    });
-    break;
+  if (!room) return;
+  // Manual one-shot nudge on an ACTIVE room keeps legacy behavior: a single
+  // FIFO tick with no burst machinery. In self-talk rooms a burst starts.
+  if (room.status !== "self-talk") {
+    const agents: string[] = JSON.parse(room.agent_ids || "[]");
+    for (const aId of agents) {
+      const key = queueKey(roomId, aId);
+      if (runningAgents.has(key)) continue;
+      const lastRow = db.prepare(`
+        SELECT content FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT 1
+      `).get(roomId) as { content: string } | undefined;
+      if (!lastRow) break;
+      sendAll("self_talk.tick", { roomId, agentId: aId, timestamp: Date.now() });
+      await invokeAgentAsync({
+        roomId,
+        agentId: aId,
+        prompt: `${lastRow.content}\n\n(self-talk tick — continue the conversation)`,
+        source: "self-talk",
+      });
+      break;
+    }
+    return;
   }
+  startBurst(roomId);
 }
+
+// register the chained-tick invoker with burst.ts (avoids an import cycle —
+// burst.ts must not import triggers.ts)
+registerChainTick((roomId, agentId, prompt) =>
+  invokeAgentAsync({ roomId, agentId, prompt, source: "self-talk" }));

@@ -91,6 +91,8 @@ export default function App() {
   // so parallel same-role instances (to:["forge","forge"]) render as separate
   // rows in the running dock.
   const [liveRuns, setLiveRuns] = useState<Record<string, LiveRun>>({});
+  // self-talk burst progress (turn counter shown in the room header chip)
+  const [burstProgress, setBurstProgress] = useState<{ roomId: string; turnCount: number; maxTurns: number } | null>(null);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
 
   // rAF-batched streaming buffers: WS events arrive faster than 60fps and we
@@ -635,6 +637,10 @@ export default function App() {
         }
         case "agent.completed": {
           const p = payload as { roomId: string; agentId: string; elapsedMs?: number; runId?: string };
+          // burst progress: each completed agent turn advances the counter
+          setBurstProgress((b) => (b && b.roomId === p.roomId
+            ? { ...b, turnCount: Math.min(b.turnCount + 1, b.maxTurns) }
+            : b));
           setLiveRuns(prev => {
             const next = { ...prev };
             for (const k of Object.keys(next)) {
@@ -732,8 +738,18 @@ export default function App() {
           else if (p.reason === "barge-in-interrupt") toast.info(`已打断 @${p.agentId} 的当前任务，新指示立即执行`, p);
           break;
         }
-        case "self_talk.start":
-        case "self_talk.stop":
+        case "self_talk.start": {
+          const p = payload as { roomId: string; maxTurns?: number };
+          setBurstProgress({ roomId: p.roomId, turnCount: 0, maxTurns: p.maxTurns ?? 35 });
+          if (currentRoomId) api.listRoomEvents(currentRoomId).then(setEvents).catch(() => {});
+          break;
+        }
+        case "self_talk.stop": {
+          const p = payload as { roomId: string };
+          setBurstProgress((b) => (b?.roomId === p.roomId ? null : b));
+          if (currentRoomId) api.listRoomEvents(currentRoomId).then(setEvents).catch(() => {});
+          break;
+        }
         case "escalation":
         case "rework":
         case "finding.accepted":
@@ -946,9 +962,19 @@ export default function App() {
   }, [currentRoom, messages, tasks, download]);
 
   const handleToggleSelfTalk = useCallback(() => {
-    if (!currentRoomId) return;
-    api.selfTalkTick(currentRoomId).catch(() => {});
-  }, [currentRoomId]);
+    if (!currentRoom) return;
+    // toggle the ROOM's real status — the header chip + button highlight read
+    // from room.status, so the switch survives reloads and drives the server
+    // burst state machine (self-talk rooms auto-chain ticks).
+    const next = currentRoom.status === "self-talk" ? "active" : "self-talk";
+    api.updateRoom(currentRoom.id, { status: next }).then((room) => {
+      setRooms((rs) => rs.map((r) => (r.id === room.id ? { ...r, status: room.status } : r)));
+      if (next === "self-talk") {
+        // opening self-talk immediately kicks off a burst
+        api.selfTalkTick(room.id).catch(() => {});
+      }
+    }).catch(() => {});
+  }, [currentRoom]);
 
   const handleDeleteMessage = useCallback((message: Message) => {
     if (!currentRoomId) return;
@@ -1062,6 +1088,9 @@ export default function App() {
         activities={activities}
         runs={roomRuns}
         streamingCards={streamingCards}
+        burstProgress={burstProgress && burstProgress.roomId === currentRoomId
+          ? { turnCount: burstProgress.turnCount, maxTurns: burstProgress.maxTurns }
+          : null}
         wsStatus={wsStatus}
         showRightPanel={rightPanelOpen}
         onSelectRoom={setCurrentRoomId}
