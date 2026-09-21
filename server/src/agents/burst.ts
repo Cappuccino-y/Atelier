@@ -62,6 +62,8 @@ export type BurstState = {
   recentTexts: string[];
   /** consecutive low-novelty turns */
   stallCount: number;
+  /** consecutive terminal-silence replies (（终态）/（静默）) */
+  silenceCount: number;
   /** whether the one-shot re-plan has already been spent this burst */
   replanUsed: boolean;
   startedAt: number;
@@ -71,10 +73,35 @@ export type BurstState = {
 
 const bursts = new Map<string, BurstState>();
 
+/**
+ * Quiet latch: rooms whose last burst ended with a TERMINAL reason
+ * ([COMPLETE], question-to-user, budgets, stall-after-replan). While
+ * latched, the chain-end fallback in triggers.ts must NOT re-arm a burst —
+ * otherwise a [COMPLETE] stop is immediately overturned by the same
+ * turn's chain-end check and the room doom-loops (observed live in
+ * e2e-steer: [analyst] 。→ [archivist] [COMPLETE] → stop → re-arm, every
+ * ~12s for an hour). Only user input clears the latch.
+ */
+const quietRooms = new Set<string>();
+
+const QUIET_REASONS = new Set<BurstStopReason>([
+  "complete",
+  "question_to_user",
+  "max_turns",
+  "budget_exhausted",
+  "stalled_after_replan",
+]);
+
+/** true when the room's last burst ended terminally and no user input arrived since */
+export function roomQuiet(roomId: string): boolean {
+  return quietRooms.has(roomId);
+}
+
 /** test hook — wipe all state */
 export function resetBursts(): void {
   for (const b of bursts.values()) if (b.timer) clearTimeout(b.timer);
   bursts.clear();
+  quietRooms.clear();
 }
 
 export function getBurstState(roomId: string): BurstState | undefined {
@@ -148,12 +175,43 @@ function roomAgents(roomId: string): string[] {
   return row ? (JSON.parse(row.agent_ids || "[]") as string[]) : [];
 }
 
+/**
+ * Pick the next speaker for a chained tick.
+ *
+ * AutoGen SelectorGroupChat semantics: a MANAGER decides based on agent
+ * roles + conversation state — never blind round-robin. Our cheap
+ * approximation (no extra LLM call):
+ *   - a worker just finished → route back to the ORCHESTRATOR (atlas) to
+ *     evaluate progress and decide the next dispatch, like Magentic-One's
+ *     ledger loop (worker → orchestrator → next worker). Blind rotation
+ *     between two workers is exactly the e2e-steer pathology
+ *     (analyst↔archivist chattering forever without any dispatch).
+ *   - the orchestrator just finished → pick the first non-orchestrator
+ *     (it just handed off or concluded; give a worker the floor).
+ *   - never pick the same speaker twice in a row (allow_repeated_speaker
+ *     = false, AutoGen default) unless it's the only agent.
+ */
 function nextSpeaker(roomId: string, excludeAgentId: string | null): string | null {
   const agents = roomAgents(roomId).filter((a) => a !== "user");
   if (agents.length === 0) return null;
   if (agents.length === 1) return agents[0];
-  // round-robin-ish: pick next agent after the last speaker (SelectorGroupChat
-  // default forbids consecutive repeats; with ≥2 agents that's always possible)
+
+  const isOrchestrator = (id: string): boolean => {
+    const row = db.prepare("SELECT role FROM agents WHERE id = ?").get(id) as { role: string } | undefined;
+    return row?.role === "orchestrator";
+  };
+
+  if (excludeAgentId && isOrchestrator(excludeAgentId)) {
+    // orchestrator spoke → pick a non-orchestrator worker
+    const workers = agents.filter((a) => a !== excludeAgentId && !isOrchestrator(a));
+    if (workers.length > 0) return workers[0];
+  } else {
+    // worker spoke (or nobody spoke yet) → the orchestrator evaluates
+    const orchestrators = agents.filter((a) => isOrchestrator(a) && a !== excludeAgentId);
+    if (orchestrators.length > 0) return orchestrators[0];
+  }
+
+  // fallback: anyone except the last speaker
   const others = agents.filter((a) => a !== excludeAgentId);
   const pool = others.length > 0 ? others : agents;
   return pool[0];
@@ -196,8 +254,14 @@ export function registerChainTick(fn: (roomId: string, agentId: string, prompt: 
 // public control API
 // ---------------------------------------------------------------------------
 
-/** start (or restart) a burst — called when user opts into self-talk / replies */
-export function startBurst(roomId: string): void {
+/**
+ * Arm a new burst (user-initiated restart). Callers that represent USER
+ * input pass `userIntent: true` to clear the quiet latch; the chain-end
+ * fallback must NOT use this flag — that's exactly the doom-loop path.
+ */
+export function startBurst(roomId: string, userIntent = false): void {
+  if (userIntent) quietRooms.delete(roomId);
+  else if (roomQuiet(roomId)) return; // latched: terminal stop is sticky
   const prev = bursts.get(roomId);
   if (prev?.timer) clearTimeout(prev.timer);
   const state: BurstState = {
@@ -206,6 +270,7 @@ export function startBurst(roomId: string): void {
     tokenUsage: 0,
     recentTexts: [],
     stallCount: 0,
+    silenceCount: 0,
     replanUsed: false,
     startedAt: Date.now(),
     lastAgentId: null,
@@ -220,9 +285,14 @@ export function startBurst(roomId: string): void {
 /** user spoke — the in-flight burst budget resets; a fresh burst begins */
 export function abortBurst(roomId: string, reason: BurstStopReason = "aborted_by_user"): void {
   const prev = bursts.get(roomId);
-  if (!prev) return;
+  if (!prev) {
+    // even without a live burst, user input clears a terminal-stop latch
+    quietRooms.delete(roomId);
+    return;
+  }
   if (prev.timer) clearTimeout(prev.timer);
   bursts.delete(roomId);
+  quietRooms.delete(roomId);
   sendAll("self_talk.stop", { roomId, reason, turnCount: prev.turnCount, tokenUsage: prev.tokenUsage, elapsedMs: Date.now() - prev.startedAt, timestamp: Date.now() });
 }
 
@@ -242,21 +312,27 @@ export type TurnOutcome = {
 
 /**
  * Record one completed agent turn and decide: continue / re-plan / stop.
- * Returns the outcome; triggers.ts applies side effects (chained tick,
- * re-plan routing) — burst.ts owns counting + the stop decision only.
+ * `prompt` is the turn's input prompt — token fallback estimation must count
+ * it too (a turn's real cost ≈ full prompt + reply; the reply alone can be
+ * <1% of that). Returns the outcome; triggers.ts applies side effects
+ * (chained tick, re-plan routing) — burst.ts owns counting + the stop
+ * decision only.
  */
 export function recordTurn(
   roomId: string,
   agentId: string,
   content: string,
   tokens: number,
+  prompt = "",
 ): TurnOutcome {
   const state = bursts.get(roomId);
   // no live burst (e.g. manual one-shot tick with room active): nothing to do
   if (!state) return {};
 
   state.turnCount += 1;
-  state.tokenUsage += tokens > 0 ? tokens : estimateTokens(content);
+  // real runtime usage already covers the prompt (opencode reports per-
+  // message input tokens) — only the ESTIMATOR path needs the prompt added
+  state.tokenUsage += tokens > 0 ? tokens : estimateTokens(content) + estimateTokens(prompt);
   state.lastAgentId = agentId;
 
   const norm = normalizeForStall(content);
@@ -287,12 +363,40 @@ export function recordTurn(
   }
 
   // ---- condition ③: stall detection with one-shot re-plan -----------------
-  const texts = state.recentTexts;
+  // SNAPSHOT before pushing: texts is a live reference to recentTexts —
+  // comparing after the push would compare norm against ITSELF (sim 1.0),
+  // marking every turn stalled (this exact bug drove the e2e-steer
+  // re-plan storm: every turn looked "no progress").
+  const texts = [...state.recentTexts];
+  // Terminal-silence handling: an agent that explicitly signals "nothing to
+  // do" (（终态）, （静默）, （—）, bare punctuation) is NOT a stall — it's a
+  // deliberate idling reply. Counting it as a stall woke atlas with re-plan
+  // prompts every minute while agents correctly reported the task was done
+  // (observed live in e2e-steer). Two consecutive terminal-silences end the
+  // burst quietly (workers agree there is no open work → wait for user).
+  const terminalSilence =
+    norm.length < 30 &&
+    (/终态|静默|零输出|无新事件|无未闭合|无事可做/.test(norm) ||
+      /^[.\u3002\u3001\u2026\s-]*$/.test(norm) ||
+      norm === "终态" || norm === "静默");
+  state.recentTexts.push(norm);
+  if (state.recentTexts.length > 3) state.recentTexts.shift();
+  if (terminalSilence) {
+    state.silenceCount = (state.silenceCount ?? 0) + 1;
+    if (state.silenceCount >= 2) {
+      stopBurst(roomId, "complete");
+      return {};
+    }
+    // one silence: continue to the next speaker once (maybe another agent
+    // still has open work), but do NOT count it as stall progress
+    scheduleNext(roomId, state);
+    return {};
+  }
+  state.silenceCount = 0;
+
   const stalledNow =
     (texts.length >= 1 && similarity(norm, texts[texts.length - 1]) > DEFAULT_BURST_CONFIG.stallSimilarity) ||
     norm.length < 50;
-  state.recentTexts.push(norm);
-  if (state.recentTexts.length > 3) state.recentTexts.shift();
 
   if (stalledNow) state.stallCount += 1;
   else state.stallCount = Math.max(0, state.stallCount - 1);
@@ -329,6 +433,9 @@ export function stopBurst(roomId: string, reason: BurstStopReason): void {
   if (!state) return;
   if (state.timer) clearTimeout(state.timer);
   bursts.delete(roomId);
+  // Terminal stops latch the room: the chain-end fallback must not re-arm a
+  // burst until USER input clears the latch (the doom-loop guard).
+  if (QUIET_REASONS.has(reason)) quietRooms.add(roomId);
   if (reason !== "aborted_by_user") {
     sendAll("self_talk.stop", {
       roomId, reason,

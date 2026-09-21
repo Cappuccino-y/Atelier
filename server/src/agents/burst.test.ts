@@ -17,6 +17,7 @@ const {
   normalizeForStall,
   similarity,
   estimateTokens,
+  roomQuiet,
 } = await import("./burst.js");
 
 // capture broadcast events instead of requiring a WS client
@@ -96,13 +97,17 @@ describe("burst — lifecycle + condition ② ([COMPLETE] / question-to-user)", 
 
   it("startBurst marks active and emits self_talk.start", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     assert.ok(burstActive(roomId));
     assert.equal(lastOf("self_talk.start")?.roomId, roomId);
     assert.equal(lastOf("self_talk.start")?.maxTurns, DEFAULT_BURST_CONFIG.maxTurns);
   });
 
   it("[COMPLETE] stops the burst with reason=complete", () => {
+    // latch from the previous test's stop clears only via user intent —
+    // in-process tests simulate the user by resetting state
+    resetBursts();
+    startBurst(roomId, true);
     const out = recordTurn(roomId, "forge", "全部完成。[COMPLETE]", 100);
     assert.deepEqual(out, {});
     assert.equal(burstActive(roomId), false);
@@ -111,21 +116,24 @@ describe("burst — lifecycle + condition ② ([COMPLETE] / question-to-user)", 
   });
 
   it("handoff with empty to[] also stops the burst", () => {
-    startBurst(roomId);
+    resetBursts();
+    startBurst(roomId, true);
     recordTurn(roomId, "atlas", `收尾。\n\n{"schemaVersion":"2.0","to":[]}`, 50);
     assert.equal(burstActive(roomId), false);
     assert.equal(lastOf("self_talk.stop")?.reason, "complete");
   });
 
   it("[QUESTION] without a handoff block pauses for the user", () => {
-    startBurst(roomId);
+    resetBursts();
+    startBurst(roomId, true);
     recordTurn(roomId, "forge", "[QUESTION] 需要确认：接口用 REST 还是 GraphQL？请回复。", 80);
     assert.equal(burstActive(roomId), false);
     assert.equal(lastOf("self_talk.stop")?.reason, "question_to_user");
   });
 
   it("[QUESTION] WITH a handoff block does NOT pause (agent-to-agent question)", () => {
-    startBurst(roomId);
+    resetBursts();
+    startBurst(roomId, true);
     recordTurn(roomId, "forge", `[QUESTION] schema 怎么定？\n\n\`\`\`handoff\n{"schemaVersion":"2.0","to":[{"name":"atlas"}]}\n\`\`\``, 80);
     // no pause: burst should still schedule the next tick
     assert.ok(burstActive(roomId));
@@ -148,15 +156,37 @@ describe("burst — condition ① max turns", () => {
     resetBursts();
     startBurst(roomId);
     const state = getState(roomId)!;
-    // fast-forward: simulate (maxTurns-1) recorded turns with varied content
-    // (each text mentions a distinct module so similarity stays low)
+    // fast-forward: (maxTurns-1) turns whose trigrams are genuinely disjoint
+    // (distinct CJK phrase families per turn — template texts with only a
+    // number changed ARE ~identical to trigrams and would misfire stall)
+    const topics = [
+      "数据库层改用 WAL 模式提升并发写入安全性",
+      "前端路由增加懒加载减少首屏加载体积",
+      "鉴权中间件补充令牌刷新与黑名单校验",
+      "日志管道引入结构化字段便于检索聚合",
+      "构建缓存策略调整缩短持续集成等待时间",
+      "错误码表统一收敛避免各模块自行定义",
+      "对象存储分片上传补充断点续速能力",
+      "配置中心热更新增加版本回滚保护",
+      "消息队列消费端加入幂等去重处理",
+      "监控埋点覆盖关键路径补齐延迟指标",
+      "文档站生成器迁移到新的静态框架",
+      "接口网关增加请求体大小限制防护",
+      "定时任务调度器支持分布式锁竞争",
+      "测试覆盖率报告聚合到统一面板",
+    ];
+    // pad each topic to >50 normalized chars so the short-text stall rule
+    // doesn't misfire — these turns are meant to exercise the TURN budget,
+    // not stall detection
     for (let i = 1; i < DEFAULT_BURST_CONFIG.maxTurns; i++) {
-      recordTurn(roomId, i % 2 ? "atlas" : "forge", `第 ${i} 轮实质进展：模块 alpha${i}beta 的设计与实现说明，涵盖接口约定、错误处理和测试策略等多个维度`, 1000);
+      recordTurn(roomId, i % 2 ? "atlas" : "forge",
+        `${topics[i % topics.length]}——本轮决定：接口约定采用显式版本号与向后兼容弃用策略，错误处理统一走结构化错误码，并配套补充对应的回归测试用例与文档说明（第 ${i} 批次）`,
+        1000);
       if (!burstActive(roomId)) break;
     }
     assert.ok(burstActive(roomId), "burst should survive up to maxTurns-1");
     assert.equal(state.turnCount, DEFAULT_BURST_CONFIG.maxTurns - 1);
-    recordTurn(roomId, "forge", `最后一轮，第 ${DEFAULT_BURST_CONFIG.maxTurns} 轮 gamma 的实质性产出说明，包含收尾验证与文档更新`, 1000);
+    recordTurn(roomId, "forge", `${topics[DEFAULT_BURST_CONFIG.maxTurns % topics.length]}——最后批次收尾验证：确认全部模块通过测试、文档已更新、无遗留风险项，准备结项`, 1000);
     assert.equal(burstActive(roomId), false);
     assert.equal(lastOf("self_talk.stop")?.reason, "max_turns");
     assert.equal(lastOf("self_talk.stop")?.turnCount, DEFAULT_BURST_CONFIG.maxTurns);
@@ -170,7 +200,7 @@ describe("burst — condition ④ token budget", () => {
 
   it("stops when cumulative tokens exceed maxTokens", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     // 2 turns × 3M tokens = 6M > 5M
     recordTurn(roomId, "atlas", "进展一：架构设计与模块划分的详细说明", 3_000_000);
     assert.ok(burstActive(roomId));
@@ -181,7 +211,7 @@ describe("burst — condition ④ token budget", () => {
 
   it("falls back to the text estimator when tokens=0", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     const state = getState(roomId)!;
     const before = state.tokenUsage;
     recordTurn(roomId, "atlas", "你好世界 hello world estimation check", 0);
@@ -197,7 +227,7 @@ describe("burst — condition ③ stall detection + one-shot re-plan", () => {
 
   it("3 comparable stalled turns trigger ONE atlas re-plan; 3 more stop it", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     const near = "好的，继续推进当前事项，我会保持一致地总结当前状态并复述同样的计划安排和背景说明，确保语气与结构保持一致，同时维持原有内容，不做新增工作，感谢理解";
     // warm-up: substantive, unrelated → turn 1 can never stall
     const warm = recordTurn(roomId, "atlas", "开局：先梳理本次需求的边界与目标，明确对外的接口约定和可度量的验收标准，然后按照功能模块逐个拆分成可执行的任务清单", 100);
@@ -221,7 +251,7 @@ describe("burst — condition ③ stall detection + one-shot re-plan", () => {
 
   it("short empty turns (<50 normalized chars) count as stalls", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     recordTurn(roomId, "atlas", "好的。", 10);
     recordTurn(roomId, "forge", "收到。", 10);
     const o3 = recordTurn(roomId, "atlas", "继续。", 10);
@@ -230,7 +260,7 @@ describe("burst — condition ③ stall detection + one-shot re-plan", () => {
 
   it("real progress DECAYS the stall counter (Magentic-One semantics)", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     recordTurn(roomId, "atlas", "好的，继续推进当前事项，总结当前状态并复述计划安排与背景说明，保持结构一致", 10); // stall 1 (short)
     recordTurn(roomId, "forge", "收到，继续推进当前事项，总结当前状态并复述计划安排与背景说明，保持结构一致", 10); // stall 2 (short vs short: sim 1.0)
     // completely different, substantive content → stall counter decays by 1
@@ -258,7 +288,7 @@ describe("burst — user reset + manual tick on active room", () => {
 
   it("abortBurst emits self_talk.stop with aborted_by_user (no system msg via stop)", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     assert.ok(burstActive(roomId));
     abortBurst(roomId);
     assert.equal(burstActive(roomId), false);
@@ -275,7 +305,7 @@ describe("burst — user reset + manual tick on active room", () => {
 
   it("burstProgress exposes turn/token counters", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     recordTurn(roomId, "atlas", "一个有内容的进展说明，描述当前的实现状态", 1234);
     const p = burstProgress(roomId)!;
     assert.equal(p.turnCount, 1);
@@ -291,9 +321,83 @@ describe("burst — room_no longer self-talk stops the chain", () => {
 
   it("stopBurst with room_closed cleans up", () => {
     resetBursts();
-    startBurst(roomId);
+    startBurst(roomId, true);
     stopBurst(roomId, "room_closed");
     assert.equal(burstActive(roomId), false);
     assert.equal(lastOf("self_talk.stop")?.reason, "room_closed");
+  });
+});
+
+describe("burst — quiet latch (doom-loop guard from e2e-steer)", () => {
+  const roomId = "burst-latch";
+  before(() => seedRoom(roomId));
+  after(() => cleanupRoom(roomId));
+
+  it("[COMPLETE] stop latches the room; startBurst without userIntent is a no-op", () => {
+    resetBursts();
+    startBurst(roomId, true);
+    recordTurn(roomId, "forge", "[COMPLETE] 完成", 100);
+    assert.equal(burstActive(roomId), false);
+    assert.ok(roomQuiet(roomId), "terminal stop must latch");
+    // chain-end fallback calls startBurst WITHOUT userIntent → refused
+    startBurst(roomId);
+    assert.equal(burstActive(roomId), false, "latched room must NOT re-arm");
+  });
+
+  it("startBurst(userIntent=true) clears the latch and arms a fresh burst", () => {
+    startBurst(roomId, true);
+    assert.ok(burstActive(roomId));
+    assert.equal(roomQuiet(roomId), false);
+  });
+
+  it("abortBurst (user spoke) also clears the latch", () => {
+    resetBursts();
+    startBurst(roomId, true);
+    recordTurn(roomId, "atlas", "问题。[QUESTION] 等你回复", 100);
+    assert.ok(roomQuiet(roomId));
+    abortBurst(roomId);
+    assert.equal(roomQuiet(roomId), false);
+   });
+});
+
+describe("burst — terminal silence ends quietly instead of re-plan storms", () => {
+  const roomId = "burst-silence";
+  before(() => seedRoom(roomId));
+  after(() => cleanupRoom(roomId));
+
+  it("two consecutive terminal-silence replies stop the burst as complete", () => {
+    resetBursts();
+    startBurst(roomId, true);
+    const o1 = recordTurn(roomId, "analyst", "（终态。零输出。）", 50);
+    assert.equal(o1.replan, undefined);
+    assert.ok(burstActive(roomId), "one silence: give another agent a chance");
+    recordTurn(roomId, "archivist", "（静默 — 无未闭合工作）", 50);
+    assert.equal(burstActive(roomId), false, "2 silences = workers agree: done");
+    assert.equal(lastOf("self_talk.stop")?.reason, "complete");
+    assert.ok(roomQuiet(roomId));
+  });
+
+  it("bare punctuation counts as terminal silence", () => {
+    resetBursts();
+    startBurst(roomId, true);
+    recordTurn(roomId, "analyst", "。", 10);
+    recordTurn(roomId, "archivist", "。", 10);
+    assert.equal(burstActive(roomId), false);
+  });
+});
+
+describe("burst — token estimator includes the prompt", () => {
+  const roomId = "burst-prompt";
+  before(() => seedRoom(roomId));
+  after(() => cleanupRoom(roomId));
+
+  it("recordTurn fallback counts prompt tokens (turn cost ≈ prompt + reply)", () => {
+    resetBursts();
+    startBurst(roomId, true);
+    const state = getState(roomId)!;
+    const longPrompt = "系统上下文与任务描述".repeat(200); // ~2000 CJK chars
+    const reply = "收到";
+    recordTurn(roomId, "atlas", reply, 0, longPrompt);
+    assert.ok(state.tokenUsage >= estimateTokens(longPrompt), "prompt must be counted");
   });
 });

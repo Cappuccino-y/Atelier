@@ -17,7 +17,7 @@ import {
 import { buildEchoFallback } from "./implicit-handoff.js";
 import { decideRetry, sleep } from "./retry.js";
 import { noteRunTool, summarizeToolInput, abortRun, listRuns } from "./process-agent.js";
-import { recordTurn, registerChainTick, startBurst, abortBurst, burstActive } from "./burst.js";
+import { recordTurn, registerChainTick, startBurst, abortBurst, burstActive, roomQuiet } from "./burst.js";
 import { nanoid } from "nanoid";
 import { debugLog } from "./debug.js";
 
@@ -510,9 +510,11 @@ export async function triggerOnMessage(params: TriggerParams): Promise<void> {
     // In a self-talk room the user's message itself arms a new burst: the
     // first agent turn lands in a live burst and turn counting/termination
     // apply from turn 1 (instead of only after a chain dead-ends).
+    // userIntent=true clears the terminal-stop quiet latch — user input is
+    // the ONLY thing that may restart a latched room.
     const roomRow = db.prepare("SELECT status FROM rooms WHERE id = ?").get(params.roomId) as { status: string } | undefined;
     if (roomRow?.status === "self-talk") {
-      startBurst(params.roomId);
+      startBurst(params.roomId, true);
     }
     // User messages: explicit mention list (Composer/interrupt-steer) wins;
     // fall back to parsing @mentions from text for plain-text sends.
@@ -1473,7 +1475,7 @@ async function invokeAgentAsync(opts: {
       // A `replan` outcome overrides normal routing with a one-shot re-plan
       // prompt to atlas (Magentic-One outer loop). Otherwise the burst
       // state machine schedules the next chained tick itself.
-      const burstOutcome = recordTurn(opts.roomId, opts.agentId, result.content, usageTokens);
+      const burstOutcome = recordTurn(opts.roomId, opts.agentId, result.content, usageTokens > 0 ? usageTokens : 0, opts.prompt);
       if (burstOutcome.replan) {
         const atlas = getAgentByName("atlas");
         if (atlas) {
@@ -1491,11 +1493,20 @@ async function invokeAgentAsync(opts: {
       // In a self-talk room, a chain that ends without any handoff (agent
       // concluded, forgot to hand off, or validation-passed-with-no-targets)
       // must NOT dead-end the autonomous loop — start a burst so the chained
-      // tick picks a next speaker and continues (AutoGen group-chat keeps
-      // selecting speakers until a termination condition; the burst state
-      // machine owns those conditions).
+      // tick picks a next speaker and continues. BUT a room whose last burst
+      // ended TERMINALLY ([COMPLETE]/budgets/stall-after-replan) stays quiet:
+      // without the latch this check fires right after stopBurst in the same
+      // turn and re-arms endlessly (observed live: [COMPLETE] → stop →
+      // re-arm → [COMPLETE] every ~12s for an hour). The latch clears only
+      // via user input (startBurst(..., true) on the user-message path).
       const statusRow = db.prepare("SELECT status FROM rooms WHERE id = ?").get(opts.roomId) as { status: string } | undefined;
-      if (statusRow?.status === "self-talk" && !burstActive(opts.roomId) && nextDirectives.length === 0 && !retryScheduled) {
+      if (
+        statusRow?.status === "self-talk" &&
+        !burstActive(opts.roomId) &&
+        !roomQuiet(opts.roomId) &&
+        nextDirectives.length === 0 &&
+        !retryScheduled
+      ) {
         debugLog("burst", opts.roomId, opts.agentId, "chain ended in self-talk room — starting burst");
         startBurst(opts.roomId);
       }
